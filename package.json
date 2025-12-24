@@ -1,0 +1,11 @@
+{
+  "name": "tubiq-monorepo",
+  "private": true,
+  "workspaces": [
+    "collector-worker"
+  ],
+  "scripts": {
+    "build:worker": "npm --workspace collector-worker run build",
+    "start:worker": "npm --workspace collector-worker run start"
+  }
+}
