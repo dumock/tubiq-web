@@ -2,10 +2,11 @@
   "name": "tubiq-monorepo",
   "private": true,
   "workspaces": [
-    "collector-worker"
+    "collector-worker",
+    "crawler-worker"
   ],
   "scripts": {
-    "build:worker": "npm --workspace collector-worker run build",
-    "start:worker": "npm --workspace collector-worker run start"
+    "start:collector": "npm --workspace collector-worker run start",
+    "start:crawler": "npm --workspace crawler-worker run start"
   }
 }
