@@ -1,7 +1,9 @@
 // crawler-worker/index.mjs
-// 역할: DB에 이미 들어있는 채널(youtube_channel_id)을 대상으로 YouTube Data API로 상세 메타/통계 채워넣기
-// - quota 효율: channels.list (part=snippet,statistics) 는 보통 1 unit
-// - daily view 같은 건 YouTube Analytics 권한 없으면 못 가져오니, 여기서는 "기초 필드 채우기"에 집중
+// 역할: channels 테이블의 youtube_channel_id 대상으로 YouTube Data API channels.list로 메타/통계 채우기
+// 특징:
+// - DB 컬럼명이 다를 수 있으니 "컬럼 매핑"을 ENV로 받음 (없으면 그 필드는 업데이트/조건에 포함 안 함)
+// - 60초마다 heart-beat 로그 찍어서 "살아있는지" 확인 가능
+// - Node 22+ 글로벌 fetch 사용
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -20,7 +22,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
 }
 if (YT_KEYS.length === 0) {
-  throw new Error("Missing YOUTUBE_API_KEY_1 (and optional _2/_3/_4)");
+  throw new Error("Missing YOUTUBE_API_KEY_(1~4)");
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
@@ -28,11 +30,47 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const pickKey = (i) => YT_KEYS[i % YT_KEYS.length];
 
-function pickKey(i) {
-  return YT_KEYS[i % YT_KEYS.length];
+// ====== 컬럼 매핑 (중요) ======
+// DB에 실제 존재하는 컬럼명으로 설정해주면 그 컬럼을 업데이트함.
+// 없거나 비워두면 그 필드는 건드리지 않아서 "column does not exist"로 안 죽음.
+const COL = {
+  id: process.env.COL_YOUTUBE_CHANNEL_ID || "youtube_channel_id",
+
+  // 아래는 "있으면" 켜고 없으면 그냥 비워둬도 됨
+  title: process.env.COL_TITLE || "title",
+  thumbnail: process.env.COL_THUMBNAIL_URL || "thumbnail_url",
+  country: process.env.COL_COUNTRY || "country",
+  publishedAt: process.env.COL_PUBLISHED_AT || "published_at",
+
+  subscriber: process.env.COL_SUBSCRIBER_COUNT || "", // 예: subscriber_count
+  view: process.env.COL_VIEW_COUNT || "", // 예: view_count (너희 DB엔 없어서 에러났던 컬럼)
+  video: process.env.COL_VIDEO_COUNT || "", // 예: video_count
+
+  updatedAt: process.env.COL_UPDATED_AT || "updated_at",
+};
+
+// 어떤 컬럼을 실제로 업데이트할지 결정 (빈 문자열은 스킵)
+function buildUpdateObject(payload) {
+  const u = {};
+
+  // title/thumbnail/country/publishedAt는 기본으로 시도 (없으면 여기서도 에러 날 수 있으니: 정말 없으면 ENV로 "" 주면 됨)
+  if (COL.title) u[COL.title] = payload.title;
+  if (COL.thumbnail) u[COL.thumbnail] = payload.thumbnail_url;
+  if (COL.country) u[COL.country] = payload.country;
+  if (COL.publishedAt) u[COL.publishedAt] = payload.published_at;
+
+  if (COL.subscriber) u[COL.subscriber] = payload.subscriber_count;
+  if (COL.view) u[COL.view] = payload.view_count;
+  if (COL.video) u[COL.video] = payload.video_count;
+
+  if (COL.updatedAt) u[COL.updatedAt] = new Date().toISOString();
+
+  return u;
 }
 
+// ====== YouTube API ======
 async function ytChannelsList(channelIds, key) {
   const ids = channelIds.join(",");
   const url = new URL("https://www.googleapis.com/youtube/v3/channels");
@@ -42,58 +80,8 @@ async function ytChannelsList(channelIds, key) {
 
   const res = await fetch(url.toString());
   const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`YouTube API error ${res.status}: ${text}`);
-  }
+  if (!res.ok) throw new Error(`YouTube API error ${res.status}: ${text}`);
   return JSON.parse(text);
-}
-
-/**
- * DB 스키마가 아직 확정이 아니라서,
- * - "비어있는 필드만 대상으로 잡기"를 먼저 시도하고
- * - 컬럼이 없어서 에러나면 youtube_channel_id만 가져오는 안전모드로 폴백한다.
- */
-async function fetchTargets(batchSize = 50) {
-  // 1) 원래 의도(빈 필드 채우기) 방식 시도
-  try {
-    const { data, error } = await supabase
-      .from("channels")
-      .select(
-        "youtube_channel_id, title, subscriber_count, view_count, video_count, thumbnail_url, country, published_at"
-      )
-      .like("youtube_channel_id", "UC_%")
-      .or(
-        [
-          "subscriber_count.is.null",
-          "view_count.is.null",
-          "video_count.is.null",
-          "thumbnail_url.is.null",
-          "country.is.null",
-          "published_at.is.null",
-        ].join(",")
-      )
-      .limit(batchSize);
-
-    if (error) throw error;
-    return data ?? [];
-  } catch (e) {
-    const msg = String(e?.message ?? e);
-    // 스키마 불일치(컬럼 없음)일 때 폴백
-    if (msg.includes("does not exist") || msg.includes("column")) {
-      console.warn(
-        `[crawler] fetchTargets fallback (schema mismatch): ${msg}`
-      );
-      const { data, error } = await supabase
-        .from("channels")
-        .select("youtube_channel_id")
-        .like("youtube_channel_id", "UC_%")
-        .limit(batchSize);
-
-      if (error) throw error;
-      return data ?? [];
-    }
-    throw e;
-  }
 }
 
 function normalizeChannel(item) {
@@ -114,138 +102,151 @@ function normalizeChannel(item) {
     subscriber_count: stats.subscriberCount ? Number(stats.subscriberCount) : null,
     view_count: stats.viewCount ? Number(stats.viewCount) : null,
     video_count: stats.videoCount ? Number(stats.videoCount) : null,
-    updated_at: new Date().toISOString(),
   };
 }
 
-/**
- * update 시 "없는 컬럼" 때문에 죽는 상황을 피하기 위해
- * - 없는 컬럼 에러가 나면 그 필드를 제거하고 재시도한다.
- */
-async function updateChannelRow(payload) {
-  const baseWhere = supabase
+// ====== DB 대상 가져오기 ======
+async function fetchTargets(batchSize = 50) {
+  // "컬럼이 없어서 죽는 것"을 막기 위해:
+  // - 기본은 id 컬럼만 select
+  // - '업데이트할 컬럼'이 있을 때만 null 체크 조건을 붙임
+  const selectCols = new Set([COL.id]);
+
+  // null 체크를 하고 싶은 컬럼만 포함 (존재한다고 확신 없으면 ENV로 비워두면 됨)
+  for (const c of [COL.title, COL.thumbnail, COL.country, COL.publishedAt, COL.subscriber, COL.view, COL.video]) {
+    if (c) selectCols.add(c);
+  }
+
+  let q = supabase
     .from("channels")
-    .update({}) // placeholder, 아래에서 다시 세팅
-    .eq("youtube_channel_id", payload.youtube_channel_id);
+    .select([...selectCols].join(","))
+    .like(COL.id, "UC_%")
+    .limit(batchSize);
 
-  // 업데이트 후보 키들(우선순위: 중요한 것부터)
-  const keys = [
-    "title",
-    "thumbnail_url",
-    "country",
-    "published_at",
-    "subscriber_count",
-    "view_count",
-    "video_count",
-    "updated_at",
-  ];
-
-  // payload에서 실제로 값이 있는 것만
-  const working = { youtube_channel_id: payload.youtube_channel_id };
-  for (const k of keys) {
-    if (k in payload) working[k] = payload[k];
+  // 업데이트 대상 필드들 중 하나라도 null이면 가져오게
+  const nullChecks = [];
+  for (const c of [COL.title, COL.thumbnail, COL.country, COL.publishedAt, COL.subscriber, COL.view, COL.video]) {
+    if (c) nullChecks.push(`${c}.is.null`);
+  }
+  if (nullChecks.length > 0) {
+    q = q.or(nullChecks.join(","));
   }
 
-  // 최소한 youtube_channel_id는 where에만 쓰고, update에는 빼기
-  delete working.youtube_channel_id;
+  const { data, error } = await q;
+  if (error) throw error;
 
-  // 없다고 뜨는 필드를 하나씩 제거하면서 최대 8번까지 재시도
-  let attemptKeys = [...Object.keys(working)];
-  for (let i = 0; i < 8; i++) {
-    const updateObj = {};
-    for (const k of attemptKeys) updateObj[k] = working[k];
-
-    const { error } = await supabase
-      .from("channels")
-      .update(updateObj)
-      .eq("youtube_channel_id", payload.youtube_channel_id);
-
-    if (!error) return;
-
-    const msg = String(error?.message ?? error);
-    if (msg.includes("does not exist") || msg.includes("column")) {
-      // 에러 메시지에서 "channels.xxx" 또는 '"xxx"' 를 최대한 뽑아봄
-      const m1 = msg.match(/channels\.([a-zA-Z0-9_]+)/);
-      const m2 = msg.match(/column\s+"([^"]+)"/);
-      const bad = (m1?.[1] ?? m2?.[1] ?? "").trim();
-
-      if (!bad) {
-        // 못 뽑으면 마지막 필드 하나 제거
-        attemptKeys.pop();
-      } else {
-        attemptKeys = attemptKeys.filter((k) => k !== bad);
-      }
-
-      if (attemptKeys.length === 0) {
-        console.warn("[crawler] update skipped: no compatible columns");
-        return;
-      }
-      continue;
-    }
-
-    // 스키마 문제가 아닌 다른 에러면 그대로 throw
-    throw error;
-  }
-  console.warn("[crawler] update skipped: too many schema-mismatch retries");
+  // data row는 { youtube_channel_id: "..."} 형태일 수도, COL.id가 다르면 {<colName>: "..."}일 수도 있음
+  return data ?? [];
 }
 
+async function updateChannelRow(youtubeChannelId, payload) {
+  const updateObj = buildUpdateObject(payload);
+
+  // updateObj가 비어 있으면 쓸데없이 update하지 않음
+  if (Object.keys(updateObj).length === 0) return;
+
+  const { error } = await supabase
+    .from("channels")
+    .update(updateObj)
+    .eq(COL.id, youtubeChannelId);
+
+  if (error) throw error;
+}
+
+// ====== 메인 루프 ======
 export async function startCrawler() {
-  console.log(`[crawler] start env=${NODE_ENV}, yt_keys=${YT_KEYS.length}`);
+  console.log(`[crawler] start. env=${NODE_ENV}, yt_keys=${YT_KEYS.length}`);
+  console.log(`[crawler] column mapping:`, JSON.stringify(COL));
 
   let keyIdx = 0;
+  let loops = 0;
+  let lastWorkAt = Date.now();
 
-  while (true) {
-    let targets = [];
-    try {
-      targets = await fetchTargets(50);
-    } catch (e) {
-      console.error("[crawler] fetchTargets error:", String(e?.message ?? e));
-      await sleep(15_000);
-      continue;
-    }
+  // heartbeat: 60초마다 무조건 찍어서 "멈춘 게 아니라 대기 중"인지 확인 가능
+  const hb = setInterval(() => {
+    const sec = Math.floor((Date.now() - lastWorkAt) / 1000);
+    console.log(`[crawler][hb] alive. loops=${loops}, lastWork=${sec}s ago`);
+  }, 60_000);
 
-    if (targets.length === 0) {
-      console.log("[crawler] no targets. sleep 60s");
-      await sleep(60_000);
-      continue;
-    }
+  try {
+    while (true) {
+      loops++;
 
-    const ids = targets.map((t) => t.youtube_channel_id).filter(Boolean);
-
-    try {
-      const key = pickKey(keyIdx++);
-      const json = await ytChannelsList(ids, key);
-      const items = json.items ?? [];
-
-      const byId = new Map(items.map((it) => [it.id, it]));
-
-      let updated = 0;
-      for (const id of ids) {
-        const item = byId.get(id);
-        if (!item) continue;
-
-        const payload = normalizeChannel(item);
-        await updateChannelRow(payload);
-        updated++;
-      }
-
-      console.log(`[crawler] updated ${updated}/${ids.length} channels`);
-      await sleep(1000);
-    } catch (e) {
-      const msg = String(e?.message ?? e);
-      console.error("[crawler] error:", msg);
-
-      if (msg.includes("403") || msg.toLowerCase().includes("quota")) {
-        console.error("[crawler] quota/403 suspected. switching key and sleep 10s");
-        await sleep(10_000);
+      let targets;
+      try {
+        targets = await fetchTargets(50);
+      } catch (e) {
+        console.error("[crawler] fetchTargets error:", e?.message ?? e);
+        await sleep(15_000);
         continue;
       }
 
-      await sleep(15_000);
+      if (targets.length === 0) {
+        console.log("[crawler] no targets. sleep 60s");
+        await sleep(60_000);
+        continue;
+      }
+
+      // 실제 youtube_channel_id 값 뽑기
+      const ids = targets
+        .map((t) => t[COL.id])
+        .filter((v) => typeof v === "string" && v.startsWith("UC"));
+
+      if (ids.length === 0) {
+        console.log("[crawler] targets found but no valid UC ids. sleep 60s");
+        await sleep(60_000);
+        continue;
+      }
+
+      try {
+        const key = pickKey(keyIdx++);
+        const json = await ytChannelsList(ids, key);
+        const items = json.items ?? [];
+        const byId = new Map(items.map((it) => [it.id, it]));
+
+        let updated = 0;
+
+        for (const id of ids) {
+          const item = byId.get(id);
+          if (!item) continue;
+
+          const payload = normalizeChannel(item);
+
+          try {
+            await updateChannelRow(id, payload);
+            updated++;
+          } catch (e) {
+            // 여기서 컬럼명 틀리면 에러가 뜨므로 바로 로그로 보임
+            console.error(`[crawler] update failed for ${id}:`, e?.message ?? e);
+          }
+        }
+
+        lastWorkAt = Date.now();
+        console.log(`[crawler] updated ${updated}/${ids.length} channels (api_items=${items.length})`);
+
+        await sleep(1000);
+      } catch (e) {
+        const msg = String(e?.message ?? e);
+        console.error("[crawler] error:", msg);
+
+        if (msg.includes("403") || msg.toLowerCase().includes("quota")) {
+          console.error("[crawler] quota/403 suspected. switching key and sleep 10s");
+          await sleep(10_000);
+          continue;
+        }
+
+        await sleep(15_000);
+      }
     }
+  } finally {
+    clearInterval(hb);
   }
 }
 
-// worker-runner가 startCrawler를 import해서 호출하는 구조면 export만으로 충분.
-// 혹시 직접 실행도 가능하게 하려면 아래 주석을 풀어도 됨.
-// if (import.meta.url === `file://${process.argv[1]}`) startCrawler();
+// (선택) 이 파일을 직접 node로 실행할 때도 돌아가게
+if (import.meta.url === `file://${process.argv[1]}`) {
+  startCrawler().catch((e) => {
+    console.error("[crawler] fatal:", e?.message ?? e);
+    process.exit(1);
+  });
+}
