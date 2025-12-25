@@ -6,7 +6,7 @@
     "crawler-worker"
   ],
   "scripts": {
-    "start:collector": "npm --workspace collector-worker run start",
-    "start:crawler": "npm --workspace crawler-worker run start"
+    "build": "echo \"no build\"",
+    "start": "node worker-runner.cjs"
   }
 }
