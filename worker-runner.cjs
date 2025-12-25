@@ -10,7 +10,17 @@ console.log(`🚀 Worker started with role: ${role}`);
 if (role === "collector") {
   import("./collector-worker/index.js");
 } else if (role === "crawler") {
-  import("./crawler-worker/index.mjs");
+  import("./crawler-worker/index.mjs")
+    .then((mod) => {
+      if (typeof mod.startCrawler !== "function") {
+        throw new Error("startCrawler is not exported");
+      }
+      return mod.startCrawler();
+    })
+    .catch((err) => {
+      console.error("❌ Failed to start crawler:", err);
+      process.exit(1);
+    });
 } else {
   console.error("❌ Unknown WORKER_ROLE:", role);
   process.exit(1);
