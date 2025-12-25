@@ -1,17 +1,6 @@
 // crawler-worker/index.mjs
-// 역할: channels 테이블에 이미 있는 youtube_channel_id 대상으로
-// YouTube Data API(channels.list)로 "기초 메타" 채워넣기
-//
-// ✅ 현재 DB 스키마 기준으로 업데이트하는 컬럼:
-// - title
-// - subscriber_count
-// - thumbnail_url
-// - published_at
-//
-// ❌ DB에 없어서 절대 건드리지 않는 컬럼:
-// - view_count
-// - video_count
-// - country
+// 역할: DB에 이미 들어있는 채널(youtube_channel_id)을 대상으로
+// YouTube Data API로 "기본 메타/구독자"만 채워넣기 (현재 DB 스키마 기준)
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -38,7 +27,11 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const pickKey = (i) => YT_KEYS[i % YT_KEYS.length];
+const nowIso = () => new Date().toISOString();
+
+function pickKey(i) {
+  return YT_KEYS[i % YT_KEYS.length];
+}
 
 async function ytChannelsList(channelIds, key) {
   const ids = channelIds.join(",");
@@ -47,27 +40,34 @@ async function ytChannelsList(channelIds, key) {
   url.searchParams.set("id", ids);
   url.searchParams.set("key", key);
 
+  // Node 22+ 에서는 fetch 내장
   const res = await fetch(url.toString());
   const text = await res.text();
+
   if (!res.ok) {
     throw new Error(`YouTube API error ${res.status}: ${text}`);
   }
   return JSON.parse(text);
 }
 
+/**
+ * ✅ 현재 네 DB에 없는 컬럼은 절대 select/update에 넣지 않는다.
+ * - view_count, video_count, country, updated_at => 현재 없음(로그로 확인됨)
+ * - 그래서 title/subscriber_count/thumbnail_url/published_at만 다룬다.
+ */
 async function fetchTargets(batchSize = 50) {
-  // ✅ 현재 channels 테이블에 "있는 컬럼"만 select 해야 함
-  // 비어있는 값들만 골라서 대상 잡기
+  // "비어있는 필드" 기준으로 대상 잡기
+  // published_at / thumbnail_url / subscriber_count 중 하나라도 null이면 대상
   const { data, error } = await supabase
     .from("channels")
     .select("youtube_channel_id, title, subscriber_count, thumbnail_url, published_at")
-    .like("youtube_channel_id", "UC_%")
+    .like("youtube_channel_id", "UC%")
     .or(
       [
-        "title.is.null",
         "subscriber_count.is.null",
         "thumbnail_url.is.null",
         "published_at.is.null",
+        "title.is.null",
       ].join(",")
     )
     .limit(batchSize);
@@ -83,31 +83,27 @@ function normalizeChannel(item) {
   const bestThumb =
     thumbs.high?.url ?? thumbs.medium?.url ?? thumbs.default?.url ?? null;
 
+  // ✅ 현재 DB에 존재하는 컬럼만 반환
   return {
     youtube_channel_id: item.id,
     title: snippet.title ?? null,
     thumbnail_url: bestThumb,
-    published_at: snippet.publishedAt
-      ? new Date(snippet.publishedAt).toISOString()
-      : null,
-    subscriber_count: stats.subscriberCount
-      ? Number(stats.subscriberCount)
-      : null,
+    published_at: snippet.publishedAt ? new Date(snippet.publishedAt).toISOString() : null,
+    subscriber_count: stats.subscriberCount ? Number(stats.subscriberCount) : null,
   };
 }
 
 async function updateChannelRow(payload) {
-  // ✅ DB에 존재하는 컬럼만 update 해야 함
+  // ✅ updated_at 같은 없는 컬럼은 절대 넣지 않음
+  const { youtube_channel_id, ...updates } = payload;
+
   const { error } = await supabase
     .from("channels")
     .update({
-      title: payload.title,
-      subscriber_count: payload.subscriber_count,
-      thumbnail_url: payload.thumbnail_url,
-      published_at: payload.published_at,
-      updated_at: new Date().toISOString(),
+      ...updates,
+      // (주의) DB에 updated_at 컬럼이 없으니 여기서 넣으면 또 터짐
     })
-    .eq("youtube_channel_id", payload.youtube_channel_id);
+    .eq("youtube_channel_id", youtube_channel_id);
 
   if (error) throw error;
 }
@@ -119,16 +115,16 @@ export async function startCrawler() {
   let loops = 0;
   let lastWorkAt = Date.now();
 
-  // 하트비트: "진짜 살아있는지" 30초마다 찍기
+  // ✅ “살아있음” 로그(너가 ‘아무 로그가 안 찍혀서 불안’했던 문제 해결)
   setInterval(() => {
-    const ago = Math.round((Date.now() - lastWorkAt) / 1000);
-    console.log(`[crawler][hb] alive. loops=${loops}, lastWork=${ago}s ago`);
-  }, 30_000).unref?.();
+    const secs = Math.floor((Date.now() - lastWorkAt) / 1000);
+    console.log(`[crawler][hb] alive. loops=${loops}, lastWork=${secs}s ago`);
+  }, 60_000);
 
   while (true) {
     loops += 1;
 
-    let targets = [];
+    let targets;
     try {
       targets = await fetchTargets(50);
     } catch (e) {
@@ -163,12 +159,15 @@ export async function startCrawler() {
       }
 
       lastWorkAt = Date.now();
-      console.log(`[crawler] updated ${updated}/${ids.length} channels`);
+      console.log(`[crawler] updated ${updated}/${ids.length} channels (api_items=${items.length})`);
+
+      // 너무 빠르게 돌면 API/DB 부담
       await sleep(1000);
     } catch (e) {
       const msg = String(e?.message ?? e);
       console.error("[crawler] error:", msg);
 
+      // quota/403이면 키 바꿔가며 버팀
       if (msg.includes("403") || msg.toLowerCase().includes("quota")) {
         console.error("[crawler] quota/403 suspected. switching key and sleep 10s");
         await sleep(10_000);
@@ -180,7 +179,8 @@ export async function startCrawler() {
   }
 }
 
-// ✅ worker-runner.cjs가 import만 해도 자동 실행되도록
+// ✅ 중요: import만 하면 안 돌고, 실행을 해줘야 함.
+// worker-runner가 이 파일을 import만 하는 구조면 아래 줄이 있어야 실제 실행됨.
 startCrawler().catch((e) => {
   console.error("[crawler] fatal:", e);
   process.exit(1);
