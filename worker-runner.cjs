@@ -10,7 +10,7 @@ console.log(`🚀 Worker started with role: ${role}`);
 if (role === "collector") {
   import("./collector-worker/index.js");
 } else if (role === "crawler") {
-  import("./crawler-worker/index.js");
+  import("./crawler-worker/index.mjs");
 } else {
   console.error("❌ Unknown WORKER_ROLE:", role);
   process.exit(1);
