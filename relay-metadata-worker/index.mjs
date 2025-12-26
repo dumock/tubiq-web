@@ -1,95 +1,96 @@
 // relay-metadata-worker/index.mjs
+import { createClient } from "@supabase/supabase-js";
 
-/**
- * 목적:
- * - relay-video 쪽 메타데이터를 video-db에서 사용하는 스키마로 변환
- * - 이 워커는 "변환"만 책임진다 (수집/저장은 다른 워커)
- * - 현재는 mock input 기반, I/O는 추후 연결
- */
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
-/**
- * relay-video → video-db 스키마 변환
- * @param {object} relayMeta
- * @returns {object|null}
- */
-export function transformRelayToVideoDb(relayMeta) {
-  if (!relayMeta || typeof relayMeta !== "object") {
-    return null;
-  }
+const RELAY_TABLE = process.env.SUPABASE_TABLE_RELAY_VIDEOS || "relay_videos";
+const VIDEOS_TABLE = process.env.SUPABASE_TABLE_VIDEOS || "videos";
 
-  const {
-    videoId,
-    id,
-    title,
-    channelId,
-    publishedAt,
-    durationSec,
-    thumbnails,
-    description,
-  } = relayMeta;
+const pollIntervalSec = Number(process.env.POLL_INTERVAL_SEC || 10);
+const batchSize = Number(process.env.BATCH_SIZE || 50);
 
+function transformRelayToVideoDb(relayRow) {
+  // relayRow에 user_id, channel_id가 있어야 videos에 정상 insert 가능
   return {
-    // 메타
-    source: "relay-video",
-
-    // video-db 기준 필드 (1차 가정)
-    video_id: videoId ?? id ?? null,
-    title: title ?? "",
-    channel_id: channelId ?? null,
-    description: description ?? null,
-    published_at: publishedAt ?? null,
-    duration_sec: typeof durationSec === "number" ? durationSec : null,
-
-    // 대표 썸네일 1개만 추출 (없으면 null)
-    thumbnail_url: Array.isArray(thumbnails) && thumbnails.length > 0
-      ? thumbnails[0].url ?? null
-      : null,
-
-    // 원본 보관 (디버깅 / 재처리 대비)
-    raw: relayMeta,
+    user_id: relayRow.user_id,
+    channel_id: relayRow.channel_id,
+    youtube_video_id: relayRow.external_id, // relay_videos.external_id -> videos.youtube_video_id
+    title: relayRow.title ?? relayRow.external_id ?? "", // 임시
+    thumbnail_url: relayRow.thumbnail_url ?? null,        // 임시
   };
 }
 
-/**
- * 워커 엔트리 포인트
- */
-export async function main() {
-  console.log("🧩 relay-metadata-worker started");
+async function processOnce() {
+  // 1) 미처리 relay_videos 읽기
+  const { data: relayRows, error: readErr } = await supabase
+    .from(RELAY_TABLE)
+    .select("*")
+    .eq("processed", false)
+    .order("created_at", { ascending: true })
+    .limit(batchSize);
 
-  // TODO: 실제로는 relay-video 큐/이벤트/DB에서 입력 받음
-  const mockInput = {
-    videoId: "abc123",
-    title: "sample video",
-    description: "this is a sample",
-    channelId: "ch_01",
-    publishedAt: "2025-12-26",
-    durationSec: 120,
-    thumbnails: [
-      { url: "https://example.com/a.jpg", width: 120, height: 90 },
-    ],
-  };
-
-  const transformed = transformRelayToVideoDb(mockInput);
-
-  if (!transformed) {
-    console.error("❌ transform failed:", mockInput);
+  if (readErr) throw readErr;
+  if (!relayRows?.length) {
+    console.log("[relay-metadata-worker] no jobs");
     return;
   }
 
-  // TODO: video-db writer로 전달
-  console.log(
-    "[relay-metadata-worker] transformed result:",
-    JSON.stringify(transformed, null, 2)
-  );
+  // 2) 변환 + 필수값 체크
+  const payload = [];
+  const processedIds = [];
+
+  for (const row of relayRows) {
+    if (!row.user_id || !row.channel_id || !row.external_id) {
+      console.error("[relay-metadata-worker] missing required fields:", {
+        id: row.id,
+        user_id: row.user_id,
+        channel_id: row.channel_id,
+        external_id: row.external_id,
+      });
+      continue;
+    }
+    payload.push(transformRelayToVideoDb(row));
+    processedIds.push(row.id);
+  }
+
+  if (!payload.length) return;
+
+  // 3) videos upsert (youtube_video_id로 중복 방지)
+  const { error: upsertErr } = await supabase
+    .from(VIDEOS_TABLE)
+    .upsert(payload, { onConflict: "youtube_video_id" });
+
+  if (upsertErr) throw upsertErr;
+
+  // 4) relay_videos 처리완료 표시
+  const { error: updateErr } = await supabase
+    .from(RELAY_TABLE)
+    .update({ processed: true, processed_at: new Date().toISOString() })
+    .in("id", processedIds);
+
+  if (updateErr) throw updateErr;
+
+  console.log(`[relay-metadata-worker] processed: ${processedIds.length}`);
 }
 
-/**
- * 단독 실행 지원 (node index.mjs)
- * runner에서 import로 호출할 경우에는 실행되지 않음
- */
+export async function main() {
+  console.log("🧩 relay-metadata-worker started");
+  while (true) {
+    try {
+      await processOnce();
+    } catch (e) {
+      console.error("[relay-metadata-worker] error:", e);
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalSec * 1000));
+  }
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((err) => {
-    console.error("[relay-metadata-worker] fatal error:", err);
+  main().catch((e) => {
+    console.error("[relay-metadata-worker] fatal:", e);
     process.exit(1);
   });
 }
