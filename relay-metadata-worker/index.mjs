@@ -398,7 +398,7 @@ async function processOnce() {
 }
 
 export async function main() {
-  console.log("🧩 relay-metadata-worker started");
+  console.log("🧩 relay-metadata-worker started (Mode: Realtime + Polling Fallback)");
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
     console.error(
       "[relay-metadata-worker] missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY"
@@ -408,13 +408,35 @@ export async function main() {
     console.error("[relay-metadata-worker] missing YOUTUBE_API_KEY_1");
   }
 
+  // 1) 초기 1회 실행
+  await processOnce();
+
+  // 2) 실시간 리스너 설정 (데이터가 들어오면 바로 실행)
+  const channel = supabase
+    .channel("relay-videos-changes")
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: RELAY_TABLE },
+      async (payload) => {
+        console.log("[relay-metadata-worker] New row detected! Triggering process...");
+        await processOnce();
+      }
+    )
+    .subscribe((status) => {
+      console.log(`[relay-metadata-worker] Realtime subscription status: ${status}`);
+    });
+
+  // 3) 폴링은 백업으로 유지 (네트워크 순단 등으로 이벤트를 놓칠 수 있으므로)
+  // 실시간이 돌고 있으므로 주기를 약간 늘려도 무방
+  const fallbackInterval = pollIntervalSec * 2;
   while (true) {
     try {
+      // 추가 백업 체크
       await processOnce();
     } catch (e) {
-      console.error("[relay-metadata-worker] error:", e);
+      console.error("[relay-metadata-worker] polling fallback error:", e);
     }
-    await new Promise((r) => setTimeout(r, pollIntervalSec * 1000));
+    await new Promise((r) => setTimeout(r, fallbackInterval * 1000));
   }
 }
 
