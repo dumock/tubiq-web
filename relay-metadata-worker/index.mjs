@@ -282,8 +282,8 @@ async function processOnce() {
   const invalidIds = [];
 
   for (const row of relayRows) {
-    // videos insert에 필수 (external_id만 있으면 metadata fetch후 channel_id는 자동생성 가능)
-    if (!row.user_id || !row.external_id) {
+    // videos insert에 필수 (account_id is user's UUID)
+    if (!row.account_id || !row.external_id) {
       invalidIds.push(row.id);
       continue;
     }
