@@ -368,10 +368,10 @@ async function processOnce() {
 
   if (!payload.length) return;
 
-  // 6) videos upsert (youtube_video_id로 중복 방지)
+  // 6) videos upsert (user_id + youtube_video_id로 중복 방지)
   const { error: upsertErr } = await supabase
     .from(VIDEOS_TABLE)
-    .upsert(payload, { onConflict: "youtube_video_id" });
+    .upsert(payload, { onConflict: "user_id,youtube_video_id" });
 
   if (upsertErr) {
     // upsert 실패면 processed 찍지 말고 error로 남김
