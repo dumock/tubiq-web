@@ -4,16 +4,21 @@ import React from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import AssetCard from './AssetCard';
-import { Asset } from '../mock/assets';
+import { Asset } from '@/types';
 
 interface DraggableAssetCardProps {
     asset: Asset;
     isSelected?: boolean;
     onClick?: (e: React.MouseEvent | React.TouchEvent, id: string) => void;
     onDoubleClick?: (e: React.MouseEvent) => void;
+    onDelete?: (id: string) => void;
+    onMoveToVideoAssets?: (id: string) => void;
+    onMoveToChannelAnalysis?: (id: string) => void;
+    enableChannelMenu?: boolean;
 }
 
-export default function DraggableAssetCard({ asset, isSelected, onClick, onDoubleClick }: DraggableAssetCardProps) {
+export default function DraggableAssetCard({ asset, isSelected, onClick, onDoubleClick, onDelete, onMoveToVideoAssets, onMoveToChannelAnalysis, enableChannelMenu }: DraggableAssetCardProps) {
+
     const {
         attributes,
         listeners,
@@ -63,7 +68,15 @@ export default function DraggableAssetCard({ asset, isSelected, onClick, onDoubl
             onTouchStart={handleTouchStart}
             onTouchEnd={handleTouchEnd}
         >
-            <AssetCard asset={asset} isSelected={isSelected} onDoubleClick={onDoubleClick} />
+            <AssetCard
+                asset={asset}
+                isSelected={isSelected}
+                onDoubleClick={onDoubleClick}
+                onDelete={onDelete}
+                onMoveToVideoAssets={onMoveToVideoAssets}
+                onMoveToChannelAnalysis={onMoveToChannelAnalysis}
+                enableChannelMenu={enableChannelMenu}
+            />
 
             {/* Subtle dashed outline when dragging */}
             {isDragging && (

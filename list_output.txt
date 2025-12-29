@@ -1,0 +1,7 @@
+Current stage is "@dumock6/tubiq-web:main"
+NAME                      APP             STATUS      CREATED                 UPDATED                 
+collector-worker          node@22         Error       2025-12-25 01:26:48     2025-12-26 23:03:15     
+crawler-worker            node@22         Error       2025-12-25 21:37:18     2025-12-26 23:03:16     
+relay-metadata-worker     node@22         Running     2025-12-26 23:39:48     2025-12-27 16:44:07     
+tubiq-web-relay           python@3.11     Stopped     2025-12-29 17:11:28     2025-12-29 18:26:41     
+tubiq-web-relay-v2        python@3.9      Stopped     2025-12-29 17:40:00     2025-12-29 17:41:20     

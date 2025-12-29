@@ -6,7 +6,25 @@ import { ChevronDown, Filter, FileVideo, Check } from 'lucide-react';
 interface FilterBarProps {
     onFetchVideos?: (conditions: { daysAgo: number; minViews: number; limit: number }) => void;
     isFetching?: boolean;
+    hideCollectionFilter?: boolean;
+    showCountryFilter?: boolean;
+    country?: string;
+    onCountryChange?: (country: string) => void;
+    fetchLabel?: string;
 }
+
+const COUNTRY_OPTIONS = [
+    { label: '한국 (KR)', value: 'KR' },
+    { label: '미국 (US)', value: 'US' },
+    { label: '일본 (JP)', value: 'JP' },
+    { label: '대만 (TW)', value: 'TW' },
+    { label: '베트남 (VN)', value: 'VN' },
+    { label: '태국 (TH)', value: 'TH' },
+    { label: '스페인 (ES)', value: 'ES' },
+    { label: '독일 (DE)', value: 'DE' },
+    { label: '프랑스 (FR)', value: 'FR' },
+    { label: '러시아 (RU)', value: 'RU' },
+];
 
 const DAYS_OPTIONS = [1, 2, 3, 5, 7, 10, 15, 30];
 const VIEWS_OPTIONS = [
@@ -103,10 +121,25 @@ function CustomDropdown<T extends string | number>({
     );
 }
 
-export default function FilterBar({ onFetchVideos, isFetching }: FilterBarProps) {
+const IMPORT_TYPE_OPTIONS = [
+    { label: '전체', value: 'all' },
+    { label: '쇼츠만', value: 'shorts' },
+    { label: '동영상만', value: 'videos' },
+];
+
+export default function FilterBar({
+    onFetchVideos,
+    isFetching,
+    hideCollectionFilter,
+    showCountryFilter = false,
+    country = 'KR',
+    onCountryChange,
+    fetchLabel = '영상 가져오기'
+}: FilterBarProps) {
     const [daysAgo, setDaysAgo] = useState(30);
     const [minViews, setMinViews] = useState(100000);
     const [limit, setLimit] = useState(100);
+    const [importType, setImportType] = useState<'all' | 'shorts' | 'videos'>('all');
 
     return (
         <div className="w-full border-b border-gray-100 dark:border-gray-800 bg-white dark:bg-zinc-950">
@@ -118,6 +151,16 @@ export default function FilterBar({ onFetchVideos, isFetching }: FilterBarProps)
                         <Filter className="h-4 w-4" />
                         <span>조건 설정</span>
                     </div>
+
+                    {showCountryFilter && (
+                        <CustomDropdown
+                            value={country}
+                            options={COUNTRY_OPTIONS}
+                            onChange={(val) => onCountryChange?.(val as string)}
+                            disabled={isFetching}
+                            formatLabel={(val) => `나라: ${val}`}
+                        />
+                    )}
 
                     <CustomDropdown
                         value={daysAgo}
@@ -135,26 +178,51 @@ export default function FilterBar({ onFetchVideos, isFetching }: FilterBarProps)
                         labelSuffix=" 이상"
                     />
 
-                    <CustomDropdown
-                        value={limit}
-                        options={COLLECTION_OPTIONS}
-                        onChange={setLimit}
-                        disabled={isFetching}
-                        formatLabel={(val) => `수집 ${val}개`}
-                    />
+                    {!hideCollectionFilter && (
+                        <CustomDropdown
+                            value={limit}
+                            options={COLLECTION_OPTIONS}
+                            onChange={setLimit}
+                            disabled={isFetching}
+                            formatLabel={(val) => `수집 ${val}개`}
+                        />
+                    )}
                 </div>
 
-                {/* Right Section: Fetch Action */}
-                <button
-                    onClick={() => onFetchVideos?.({ daysAgo, minViews, limit })}
-                    disabled={isFetching}
-                    className="group flex h-10 items-center gap-2 rounded-xl bg-black px-4 text-sm font-bold text-white hover:bg-zinc-800 active:scale-95 transition-all shadow-md shadow-black/5 dark:bg-white dark:text-black dark:hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
-                >
-                    <div className={`flex items-center justify-center rounded-lg bg-white/20 p-1 group-hover:bg-white/30 transition-colors ${isFetching ? 'animate-spin' : ''}`}>
-                        <FileVideo className="h-4 w-4" />
+                {/* Right Section: Import Type & Fetch Action */}
+                <div className="flex flex-wrap items-center gap-2">
+                    {/* Import Type Filter */}
+                    <div className="flex rounded-lg border border-gray-200 dark:border-zinc-700 overflow-hidden">
+                        {IMPORT_TYPE_OPTIONS.map((opt) => (
+                            <button
+                                key={opt.value}
+                                type="button"
+                                onClick={() => setImportType(opt.value as 'all' | 'shorts' | 'videos')}
+                                className={`h-10 px-3 text-sm font-medium transition-colors ${importType === opt.value
+                                    ? 'bg-indigo-600 text-white'
+                                    : 'bg-white text-gray-600 hover:bg-gray-50 dark:bg-zinc-900 dark:text-gray-300 dark:hover:bg-zinc-800'
+                                    }`}
+                            >
+                                {opt.label}
+                            </button>
+                        ))}
                     </div>
-                    {isFetching ? '가져오는 중...' : '영상 가져오기'}
-                </button>
+
+                    {/* Fetch Button */}
+                    <button
+                        onClick={() => {
+                            console.log('Import videos:', { daysAgo, minViews, limit, importType });
+                            onFetchVideos?.({ daysAgo, minViews, limit });
+                        }}
+                        disabled={isFetching}
+                        className="group flex h-10 items-center gap-2 rounded-xl bg-black px-4 text-sm font-bold text-white hover:bg-zinc-800 active:scale-95 transition-all shadow-md shadow-black/5 dark:bg-white dark:text-black dark:hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
+                    >
+                        <div className={`flex items-center justify-center rounded-lg bg-white/20 p-1 group-hover:bg-white/30 transition-colors ${isFetching ? 'animate-spin' : ''}`}>
+                            <FileVideo className="h-4 w-4" />
+                        </div>
+                        {isFetching ? '가져오는 중...' : fetchLabel}
+                    </button>
+                </div>
             </div>
         </div>
     );

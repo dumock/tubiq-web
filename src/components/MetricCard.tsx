@@ -3,14 +3,14 @@ import { ArrowUpRight, ArrowDownRight, LucideIcon } from 'lucide-react';
 interface MetricCardProps {
     title: string;
     value: string;
-    change: number;
+    change?: number;
     icon: LucideIcon;
     description?: string;
     onClick?: () => void;
 }
 
 export default function MetricCard({ title, value, change, icon: Icon, description, onClick }: MetricCardProps) {
-    const isPositive = change >= 0;
+    const isPositive = change !== undefined ? change >= 0 : true;
 
     return (
         <div
@@ -28,15 +28,17 @@ export default function MetricCard({ title, value, change, icon: Icon, descripti
                 <h3 className="text-2xl font-bold text-gray-900 dark:text-white">{value}</h3>
             </div>
 
-            <div className="mt-2 flex items-center gap-2">
-                <span className={`inline-flex items-center text-xs font-medium ${isPositive ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                    {isPositive ? <ArrowUpRight className="mr-1 h-3 w-3" /> : <ArrowDownRight className="mr-1 h-3 w-3" />}
-                    {Math.abs(change)}%
-                </span>
-                <span className="text-sm text-gray-500 dark:text-gray-400">
-                    {description || '전월 대비'}
-                </span>
-            </div>
+            {change !== undefined && (
+                <div className="mt-2 flex items-center gap-2">
+                    <span className={`inline-flex items-center text-xs font-medium ${isPositive ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                        {isPositive ? <ArrowUpRight className="mr-1 h-3 w-3" /> : <ArrowDownRight className="mr-1 h-3 w-3" />}
+                        {Math.abs(change)}%
+                    </span>
+                    <span className="text-sm text-gray-500 dark:text-gray-400">
+                        {description || '전월 대비'}
+                    </span>
+                </div>
+            )}
         </div>
     );
 }

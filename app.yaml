@@ -1,0 +1,17 @@
+name: collector-worker
+app: nodejs@18
+env:
+  - WORKER_ROLE: "collector"
+command: node worker-runner.cjs
+---
+name: relay-metadata-worker
+app: nodejs@18
+env:
+  - WORKER_ROLE: "relay-metadata"
+command: node worker-runner.cjs
+---
+name: crawler-worker
+app: nodejs@18
+env:
+  - WORKER_ROLE: "crawler"
+command: node worker-runner.cjs

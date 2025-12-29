@@ -3,6 +3,7 @@
 import { MoreHorizontal, ArrowUpRight, ArrowDownRight, Users, Eye, Video, ChevronsUpDown, ChevronUp, ChevronDown } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
+import { calculateGoodChannelScore } from '@/lib/goodChannelScore';
 
 // Types for Mock Data
 export interface Channel {
@@ -17,6 +18,10 @@ export interface Channel {
     videos: number;
     status: 'Active' | 'Growing' | 'Stable';
     avatar: string; // Placeholder color or image URL
+    topic?: string;
+    publishedAt?: string;
+    viewCount?: number;
+    videoCount?: number;
 }
 
 // Mock Data
@@ -33,6 +38,10 @@ const channels: Channel[] = [
         videos: 142,
         status: 'Growing',
         avatar: 'bg-indigo-500',
+        topic: 'IT/테크',
+        publishedAt: '2023-01-15',
+        viewCount: 85400000,
+        videoCount: 142
     },
     {
         id: '2',
@@ -46,6 +55,10 @@ const channels: Channel[] = [
         videos: 89,
         status: 'Stable',
         avatar: 'bg-rose-500',
+        topic: '일상/브이로그',
+        publishedAt: '2023-05-20',
+        viewCount: 42100000,
+        videoCount: 89
     },
     {
         id: '3',
@@ -59,32 +72,44 @@ const channels: Channel[] = [
         videos: 230,
         status: 'Active',
         avatar: 'bg-blue-500',
+        topic: '교육/지식',
+        publishedAt: '2022-11-10',
+        viewCount: 15800000,
+        videoCount: 230
     },
     {
         id: '4',
         rank: 4,
-        name: 'Foodie Heaven',
-        handle: '@foodie_hvn',
-        category: 'Food',
-        subscribers: '450K',
-        subscriberGrowth: 8.4,
-        views: '28.9M',
-        videos: 156,
+        name: 'Rising Tech Star',
+        handle: '@rising_tech',
+        category: 'Technology',
+        subscribers: '150K',
+        subscriberGrowth: 25.4,
+        views: '5.2M',
+        videos: 8,
         status: 'Growing',
-        avatar: 'bg-orange-500',
+        avatar: 'bg-emerald-500',
+        topic: 'IT/테크',
+        publishedAt: '2024-10-01',
+        viewCount: 5200000,
+        videoCount: 8
     },
     {
         id: '5',
         rank: 5,
-        name: 'Travel Diaries',
-        handle: '@travel_diaries',
-        category: 'Travel',
-        subscribers: '320K',
-        subscriberGrowth: 1.8,
-        views: '12.5M',
-        videos: 64,
+        name: 'Daily Insights',
+        handle: '@daily_insights',
+        category: 'Education',
+        subscribers: '80K',
+        subscriberGrowth: 15.8,
+        views: '2.4M',
+        videos: 15,
         status: 'Stable',
-        avatar: 'bg-emerald-500',
+        avatar: 'bg-amber-500',
+        topic: '교육/지식',
+        publishedAt: '2024-08-15',
+        viewCount: 2400000,
+        videoCount: 15
     },
 ];
 
@@ -127,7 +152,7 @@ export default function ChannelTable({
             {!hideHeader && (
                 <div className="flex items-center justify-between border-b border-gray-100 dark:border-zinc-900 px-6 py-4">
                     <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                        Top Channels
+                        오늘 주목할 채널
                     </h3>
                     <button className="text-sm font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-400">
                         View All Channels
@@ -244,14 +269,46 @@ export default function ChannelTable({
                                     </td>
                                     <td className="pl-2 pr-6 py-4">
                                         <Link href={`/channel/${channel.id}`} className="flex items-center gap-3 group/link">
-                                            <div className={`h-10 w-10 flex-shrink-0 rounded-full ${channel.avatar} flex items-center justify-center text-white font-bold group-hover/link:ring-2 group-hover/link:ring-indigo-500 transition-all`}>
-                                                {channel.name[0]}
+                                            <div className={`h-10 w-10 flex-shrink-0 rounded-full overflow-hidden flex items-center justify-center text-white font-bold group-hover/link:ring-2 group-hover/link:ring-indigo-500 transition-all ${channel.avatar.startsWith('bg-') ? channel.avatar : 'bg-gray-100 dark:bg-zinc-800'}`}>
+                                                {channel.avatar.startsWith('http') || channel.avatar.startsWith('/') ? (
+                                                    <Image
+                                                        src={channel.avatar}
+                                                        alt={channel.name}
+                                                        width={40}
+                                                        height={40}
+                                                        className="h-full w-full object-cover"
+                                                        unoptimized // Avoid domain issues for external YouTube images
+                                                    />
+                                                ) : (
+                                                    channel.name[0]
+                                                )}
                                             </div>
                                             <div>
                                                 <div className="font-medium text-gray-900 dark:text-white group-hover/link:text-indigo-600 transition-colors">
                                                     {channel.name}
                                                 </div>
-                                                <div className="text-xs text-gray-500 dark:text-gray-400">
+                                                {channel.topic && (
+                                                    <div className="text-xs text-gray-500 mt-1">
+                                                        {channel.topic}
+                                                    </div>
+                                                )}
+                                                {channel.publishedAt && channel.viewCount && channel.videoCount && (() => {
+                                                    const result = calculateGoodChannelScore({
+                                                        publishedAt: channel.publishedAt,
+                                                        viewCount: channel.viewCount,
+                                                        videoCount: channel.videoCount
+                                                    });
+                                                    if (result.signals.length > 0) {
+                                                        return (
+                                                            <div className="text-[10px] text-orange-600 font-bold mt-0.5 flex items-center gap-1 dark:text-orange-400">
+                                                                <span>🔥</span>
+                                                                <span>{result.signals.join(' · ')}</span>
+                                                            </div>
+                                                        );
+                                                    }
+                                                    return null;
+                                                })()}
+                                                <div className="text-xs text-gray-400 dark:text-gray-500">
                                                     {channel.handle}
                                                 </div>
                                             </div>

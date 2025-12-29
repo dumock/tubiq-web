@@ -1,0 +1,8 @@
+name: relay-metadata-worker
+type: nodejs@18
+stage: main
+project: tubiq-web
+command: node worker-runner.cjs
+env:
+  - name: WORKER_ROLE
+    value: relay-metadata

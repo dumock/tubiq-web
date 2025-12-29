@@ -1,20 +1,22 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import Header from '@/src/components/Header';
-import FilterBar from '@/src/components/FilterBar';
-import MetricCard from '@/src/components/MetricCard';
-import AudienceChart from '@/src/components/AudienceChart';
-import GrowthChart from '@/src/components/GrowthChart';
-import FolderSidebar from '@/src/components/FolderSidebar';
-import DraggableAssetCard from '@/src/components/DraggableAssetCard';
-import ClientOnly from '@/src/components/ClientOnly';
-import SimilarChannels from '@/src/components/SimilarChannels';
-import SubscriberChartModal from '@/src/components/SubscriberChartModal';
-import { Users, Eye, PlaySquare, TrendingUp, ChevronLeft, BarChart3, Plus } from 'lucide-react';
-import AddChannelModal from '@/src/components/AddChannelModal';
-import { mockAssets, Asset } from '@/src/mock/assets';
-import { mockFolders as initialFolders, Folder } from '@/src/mock/folders';
+import Header from '@/components/Header';
+import FilterBar from '@/components/FilterBar';
+import MetricCard from '@/components/MetricCard';
+import AudienceChart from '@/components/AudienceChart';
+import GrowthChart from '@/components/GrowthChart';
+import FolderSidebar from '@/components/FolderSidebar';
+import DraggableAssetCard from '@/components/DraggableAssetCard';
+import ClientOnly from '@/components/ClientOnly';
+import SimilarChannels from '@/components/SimilarChannels';
+import SubscriberChartModal from '@/components/SubscriberChartModal';
+import { Users, Eye, PlaySquare, TrendingUp, ChevronLeft, BarChart3, Plus, Trash2 } from 'lucide-react';
+import AddChannelModal from '@/components/AddChannelModal';
+import { Asset, Folder } from '@/types';
+import { supabase } from '@/lib/supabase';
+import { useFolders } from '@/hooks/useFolders';
+import AssetCard from '@/components/AssetCard';
 import {
     DndContext,
     pointerWithin,
@@ -25,9 +27,9 @@ import {
     useSensor,
     useSensors,
     DragEndEvent,
-    DragOverlay,
     DragStartEvent,
-    CollisionDetection
+    CollisionDetection,
+    DragOverlay
 } from '@dnd-kit/core';
 import {
     arrayMove,
@@ -35,17 +37,67 @@ import {
     rectSortingStrategy,
     SortableContext
 } from '@dnd-kit/sortable';
-import AssetCard from '@/src/components/AssetCard';
-import { Trash2 } from 'lucide-react';
 
 export default function ChannelAnalysisPage() {
     // Navigation & Data State
     const [selectedFolderId, setSelectedFolderId] = useState('all');
     const [isSubModalOpen, setIsSubModalOpen] = useState(false);
     const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
-    const [folders, setFolders] = useState<Folder[]>(initialFolders);
-    const [channels, setChannels] = useState<Asset[]>(mockAssets.filter(a => a.type === 'channel'));
+
+    // Real Data Hooks
+    const { folders, createFolder, renameFolder, deleteFolder } = useFolders('analysis');
+    const [channels, setChannels] = useState<Asset[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isLoading, setIsLoading] = useState(true);
+
+    // Fetch Channels from DB
+    const fetchChannels = async () => {
+        setIsLoading(true);
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            const token = session?.access_token;
+
+            if (token) {
+                const res = await fetch('/api/channel-assets?scope=analysis', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const json = await res.json();
+                if (json.ok && Array.isArray(json.data)) {
+                    const mappedChannels = json.data.map((row: any) => {
+                        const c = row.channels;
+                        if (!c) return null;
+
+                        return {
+                            id: row.id, // user_channels.id
+                            type: 'channel' as const,
+                            title: c.title || 'Untitled Channel',
+                            channelName: c.title || 'Untitled Channel',
+                            subscribers: c.subscriber_count || 0,
+                            views: 0,
+                            videoCount: 0,
+                            createdAt: c.published_at ? new Date(c.published_at).toISOString().split('T')[0] : '-',
+                            size: '-',
+                            updatedAt: row.created_at ? new Date(row.created_at).toISOString().split('T')[0] : '-',
+                            url: 'bg-indigo-100',
+                            folderId: row.folder_id || 'all',
+                            avatarUrl: c.thumbnail_url || '',
+                            channelUrl: c.youtube_channel_id ? `https://youtube.com/channel/${c.youtube_channel_id}` : '',
+                            youtubeChannelId: c.youtube_channel_id || ''
+                        };
+                    }).filter(Boolean) as Asset[];
+                    setChannels(mappedChannels);
+                }
+            }
+        } catch (error) {
+            console.error('Failed to fetch channels:', error);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchChannels();
+    }, []);
 
     // DnD State
     const [activeId, setActiveId] = useState<string | null>(null);
@@ -74,7 +126,7 @@ export default function ChannelAnalysisPage() {
                 return asset;
             }));
 
-            setMoveNotification(`${targetFolder.name}으로 ${selectedAssetIds.length}개 이동됨`);
+            setMoveNotification(`${targetFolder.name}으로 ${selectedAssetIds.length}개 이동됨 (Mock)`);
             setTimeout(() => setMoveNotification(null), 2000);
             setSelectedAssetIds([]);
             setLastSelectedId(null);
@@ -130,7 +182,6 @@ export default function ChannelAnalysisPage() {
         }
     };
 
-    // Sensor setup for Sortable (even if we don't strictly need sorting here, shared Sidebar needs context)
     const sensors = useSensors(
         useSensor(PointerSensor, {
             activationConstraint: {
@@ -197,20 +248,21 @@ export default function ChannelAnalysisPage() {
             over.data.current?.type === 'FOLDER' ||
             folders.some(f => f.id === overIdStr);
 
-        // Case 1: Reordering Folders
+        // Case 1: Reordering Folders (Mock)
         if (!isActiveAsset && !isOverAsset && isOverFolder) {
             if (active.id !== over.id) {
-                setFolders((items) => {
-                    const oldIndex = items.findIndex((item) => item.id === active.id);
-                    const newIndex = items.findIndex((item) => item.id === over.id);
-                    if (oldIndex === -1 || newIndex === -1) return items;
-                    return arrayMove(items, oldIndex, newIndex);
-                });
+                const oldIndex = folders.findIndex((item) => item.id === active.id);
+                const newIndex = folders.findIndex((item) => item.id === over.id);
+                if (oldIndex === -1 || newIndex === -1) return;
+
+                // const newOrder = arrayMove(folders, oldIndex, newIndex);
+                // setFolders(newOrder);
+                console.log('Folder reordering not yet supported in DB');
             }
             return;
         }
 
-        // Case 2: Reordering Assets
+        // Case 2: Reordering Assets (Mock)
         if (isActiveAsset && isOverAsset) {
             if (active.id !== over.id) {
                 setChannels((items) => {
@@ -225,21 +277,20 @@ export default function ChannelAnalysisPage() {
             return;
         }
 
-        // Case 3: Moving to Folder
+        // Case 3: Moving to Folder (Mock)
         if (isActiveAsset && isOverFolder) {
             const targetFolderId = overIdStr.startsWith('folder:') ? overIdStr.replace('folder:', '') : overIdStr;
             const targetFolder = folders.find(f => f.id === targetFolderId);
-            if (!targetFolder || targetFolderId === 'all') return;
+            if (!targetFolder) return;
 
             const idsToMove = selectedAssetIds;
-            setChannels(prev => prev.map(asset =>
-                idsToMove.includes(asset.id) ? { ...asset, folderId: targetFolderId } : asset
-            ));
 
-            setLastDroppedFolderId(targetFolderId);
-            setTimeout(() => setLastDroppedFolderId(null), 1000);
+            setChannels(prev => prev.map(asset => {
+                if (idsToMove.includes(asset.id)) return { ...asset, folderId: targetFolderId };
+                return asset;
+            }));
 
-            setMoveNotification(`${targetFolder.name}으로 ${idsToMove.length}개 이동됨`);
+            setMoveNotification(`${targetFolder.name}으로 ${idsToMove.length}개 이동됨 (Mock)`);
             setTimeout(() => setMoveNotification(null), 2000);
 
             setSelectedAssetIds([]);
@@ -255,27 +306,109 @@ export default function ChannelAnalysisPage() {
         }
     };
 
-    const handleDeleteSelected = () => {
+    const handleDeleteSelected = async () => {
         if (selectedAssetIds.length === 0) return;
         if (confirm(`${selectedAssetIds.length}개의 채널을 삭제하시겠습니까?`)) {
-            setChannels(prev => prev.filter(c => !selectedAssetIds.includes(c.id)));
-            setMoveNotification(`${selectedAssetIds.length}개 삭제됨`);
-            setTimeout(() => setMoveNotification(null), 2000);
-            setSelectedAssetIds([]);
-            setLastSelectedId(null);
+            try {
+                const { data: { session } } = await supabase.auth.getSession();
+                const token = session?.access_token;
+                if (!token) return;
+
+                await Promise.all(selectedAssetIds.map(id =>
+                    fetch(`/api/channel-assets?id=${id}`, {
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    })
+                ));
+
+                await fetchChannels();
+                setMoveNotification(`${selectedAssetIds.length}개 삭제됨`);
+                setTimeout(() => setMoveNotification(null), 2000);
+                setSelectedAssetIds([]);
+                setLastSelectedId(null);
+            } catch (error) {
+                console.error('Delete failed:', error);
+                alert('삭제 중 오류가 발생했습니다.');
+            }
         }
     };
 
-    const handleSaveChannel = (input: string) => {
-        console.log('Saving channel:', input);
-        alert(`채널이 저장되었습니다: ${input}`);
-        setIsModalOpen(false);
+    const handleDeleteSingle = async (id: string) => {
+        const channel = channels.find(c => c.id === id);
+        if (!channel) return;
+
+        if (confirm(`"${channel.channelName || channel.title}"을(를) 삭제하시겠습니까?`)) {
+            try {
+                const { data: { session } } = await supabase.auth.getSession();
+                const token = session?.access_token;
+                if (!token) return;
+
+                await fetch(`/api/channel-assets?id=${id}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                await fetchChannels();
+                setMoveNotification('삭제됨');
+                setTimeout(() => setMoveNotification(null), 2000);
+                setSelectedAssetIds(prev => prev.filter(assetId => assetId !== id));
+            } catch (error) {
+                console.error('Delete failed:', error);
+                alert('삭제 중 오류가 발생했습니다.');
+            }
+        }
+    };
+
+    const handleSaveChannel = async (channel: { id: string; title: string; handle: string; thumbnailUrl: string; subscriberCount?: number; viewCount?: number; videoCount?: number; publishedAt?: string | null }) => {
+        const currentFolderId = selectedFolderId === 'all' ? null : selectedFolderId;
+
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            const token = session?.access_token;
+
+            if (!token) {
+                alert('로그인이 필요합니다.');
+                return;
+            }
+
+            const body = {
+                youtube_channel_id: channel.id,
+                title: channel.title,
+                thumbnail_url: channel.thumbnailUrl,
+                subscriber_count: channel.subscriberCount,
+                published_at: channel.publishedAt,
+                folder_id: currentFolderId,
+                scope: 'analysis'
+            };
+
+            const res = await fetch('/api/channel-assets', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify(body)
+            });
+            const json = await res.json();
+
+            if (json.ok && json.data) {
+                await fetchChannels(); // Refresh list
+                setMoveNotification(`${channel.title} 저장 완료`);
+                setTimeout(() => setMoveNotification(null), 2000);
+                setIsModalOpen(false);
+            } else {
+                throw new Error(json.message || 'Save failed');
+            }
+        } catch (error) {
+            console.error('Save Error:', error);
+            alert('채널 저장 중 오류가 발생했습니다.');
+        }
     };
 
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-black" onClick={handleDeselect}>
             <Header />
-            <FilterBar onFetchVideos={(cond) => console.log('Fetch analysis for:', cond)} />
+            <FilterBar onFetchVideos={(cond) => console.log('Fetch analysis for (Mock):', cond)} fetchLabel="채널 가져오기" />
 
             <ClientOnly>
                 <DndContext
@@ -294,10 +427,10 @@ export default function ChannelAnalysisPage() {
                                         folders={folders}
                                         selectedFolderId={selectedFolderId}
                                         onSelect={handleSelectFolder}
-                                        onRename={(id, name) => setFolders(prev => prev.map(f => f.id === id ? { ...f, name } : f))}
-                                        onDelete={(id) => setFolders(prev => prev.filter(f => f.id !== id))}
-                                        onCreateFolder={(f) => setFolders(prev => [...prev, f])}
-                                        lastDroppedFolderId={lastDroppedFolderId}
+                                        onRename={renameFolder}
+                                        onDelete={deleteFolder}
+                                        onCreateParent={(name) => createFolder(name, null)}
+                                        onCreateChild={(name, parentId) => createFolder(name, parentId)}
                                         counts={Object.fromEntries(folders.map(f => [f.id, channels.filter(c => c.folderId === f.id).length]))}
                                         activeType={activeType}
                                     />
@@ -346,7 +479,7 @@ export default function ChannelAnalysisPage() {
                                         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                                             <MetricCard
                                                 title="총 구독자 수"
-                                                value={activeChannel?.subscribers ? (activeChannel.subscribers >= 1000000 ? `${(activeChannel.subscribers / 1000000).toFixed(1)}M` : `${(activeChannel.subscribers / 1000).toFixed(1)}K`) : "0"}
+                                                value={activeChannel?.subscribers !== undefined ? (activeChannel.subscribers >= 1000000 ? `${(activeChannel.subscribers / 1000000).toFixed(1)}M` : `${(activeChannel.subscribers / 1000).toFixed(1)}K`) : "0"}
                                                 change={12.5}
                                                 icon={Users}
                                                 onClick={() => setIsSubModalOpen(true)}
@@ -467,6 +600,7 @@ export default function ChannelAnalysisPage() {
                                                         isSelected={selectedAssetIds.includes(channel.id)}
                                                         onClick={handleAssetClick}
                                                         onDoubleClick={() => setSelectedChannelId(channel.id)}
+                                                        onDelete={() => handleDeleteSingle(channel.id)}
                                                     />
                                                 ))}
                                             </SortableContext>

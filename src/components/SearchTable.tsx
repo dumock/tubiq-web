@@ -1,10 +1,8 @@
 'use client';
 
 import { MoreHorizontal, Eye, ArrowUpRight, ArrowDownRight, ChevronsUpDown, ChevronUp, ChevronDown } from 'lucide-react';
-import { mockVideos } from '../mock/videos';
+import { Video as VideoType } from '@/types';
 import Link from 'next/link';
-
-import { Video as VideoType } from '../mock/videos';
 
 interface SearchTableProps {
     videos?: VideoType[];
@@ -23,7 +21,7 @@ export default function SearchTable({
     sortConfig,
     onSort
 }: SearchTableProps) {
-    const displayVideos = videos || mockVideos;
+    const displayVideos = videos || [];
     const allSelected = displayVideos.length > 0 && selectedIds.length === displayVideos.length;
 
     const handleHeaderCheckboxChange = () => {
@@ -117,7 +115,7 @@ export default function SearchTable({
                                         const isMac = typeof window !== 'undefined' && navigator.platform.toUpperCase().indexOf('MAC') >= 0;
                                         onToggle?.(video.id, isMac ? e.metaKey : e.ctrlKey, e.shiftKey);
                                     }}
-                                    className={`group hover:bg-gray-50 transition-colors cursor-pointer ${isSelected ? 'bg-indigo-50/30 dark:bg-indigo-900/10' : 'dark:hover:bg-zinc-900/50'}`}
+                                    className={`group hover:bg-gray-50/80 transition-all duration-200 cursor-pointer border-l-2 ${isSelected ? 'bg-indigo-50/40 border-indigo-500 dark:bg-indigo-900/10' : 'border-transparent dark:hover:bg-zinc-900/50'}`}
                                 >
                                     <td className="px-6 py-4">
                                         <input
@@ -139,7 +137,7 @@ export default function SearchTable({
                                             <img
                                                 src={video.thumbnailUrl}
                                                 alt={video.title}
-                                                className="h-16 w-28 flex-shrink-0 rounded-lg object-cover bg-gray-100 dark:bg-zinc-800 group-hover/link:ring-2 group-hover/link:ring-indigo-500 transition-all"
+                                                className="h-16 w-28 flex-shrink-0 rounded-xl object-cover bg-gray-100 dark:bg-zinc-800 ring-1 ring-gray-200 dark:ring-zinc-800 group-hover/link:ring-indigo-500/50 group-hover/link:shadow-md transition-all duration-300"
                                             />
                                             <div className="max-w-[240px]">
                                                 <div className="font-medium text-gray-900 dark:text-white line-clamp-2 group-hover/link:text-indigo-600 transition-colors">
@@ -159,14 +157,14 @@ export default function SearchTable({
                                         </span>
                                     </td>
                                     <td className="px-6 py-4 text-center">
-                                        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border
+                                        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider border
                     ${video.status === 'Published'
-                                                ? 'bg-green-50 text-green-700 border-green-200 dark:bg-green-900/20 dark:text-green-400 dark:border-green-900/50'
+                                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-400 dark:border-emerald-900/50'
                                                 : video.status === 'Processing'
-                                                    ? 'bg-yellow-50 text-yellow-700 border-yellow-200 dark:bg-yellow-900/20 dark:text-yellow-400 dark:border-yellow-900/50'
+                                                    ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-400 dark:border-amber-900/50'
                                                     : video.status === 'Scheduled'
-                                                        ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/20 dark:text-blue-400 dark:border-blue-900/50'
-                                                        : 'bg-gray-50 text-gray-700 border-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:border-gray-700'
+                                                        ? 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-900/20 dark:text-sky-400 dark:border-sky-900/50'
+                                                        : 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-900/20 dark:text-rose-400 dark:border-rose-900/50'
                                             }`}
                                         >
                                             {video.status === 'Published' ? '게시 완료' :

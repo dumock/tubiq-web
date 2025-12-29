@@ -1,14 +1,16 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import Header from '@/src/components/Header';
-import FilterBar from '@/src/components/FilterBar';
-import AssetCard from '@/src/components/AssetCard';
-import DraggableAssetCard from '@/src/components/DraggableAssetCard';
-import FolderSidebar from '@/src/components/FolderSidebar';
-import AddVideoModal from '@/src/components/AddVideoModal';
-import { mockAssets, Asset } from '@/src/mock/assets';
-import { mockFolders as initialFolders, Folder } from '@/src/mock/folders';
+import Header from '@/components/Header';
+import FilterBar from '@/components/FilterBar';
+import AssetCard from '@/components/AssetCard';
+import DraggableAssetCard from '@/components/DraggableAssetCard';
+import FolderSidebar from '@/components/FolderSidebar';
+import AddVideoModal from '@/components/AddVideoModal';
+import ConfirmModal from '@/components/ConfirmModal';
+import { useFolders } from '@/hooks/useFolders';
+import { useVideos } from '@/hooks/useVideos';
+import { Asset } from '@/types';
 import { Plus, Video as VideoIcon, Trash2 } from 'lucide-react';
 import {
     DndContext,
@@ -20,27 +22,42 @@ import {
     useSensor,
     useSensors,
     DragEndEvent,
-    DragOverlay,
     DragStartEvent,
     CollisionDetection,
+    DragOverlay,
 } from '@dnd-kit/core';
-import ClientOnly from '@/src/components/ClientOnly';
 import {
     arrayMove,
     sortableKeyboardCoordinates,
     rectSortingStrategy,
     SortableContext,
 } from '@dnd-kit/sortable';
-import { mockVideos } from '@/src/mock/videos';
+import ClientOnly from '@/components/ClientOnly';
 
 export default function VideoAssetsPage() {
     // State
     const [selectedFolderId, setSelectedFolderId] = useState('all');
     const [isModalOpen, setIsModalOpen] = useState(false);
 
-    // Data State (lifted for DnD)
-    const [folders, setFolders] = useState<Folder[]>(initialFolders);
-    const [videoAssets, setVideoAssets] = useState<Asset[]>([]);
+    // Confirm Modal State
+    const [confirmData, setConfirmData] = useState<{
+        isOpen: boolean;
+        title: string;
+        message: string;
+        confirmText?: string;
+        isDestructive?: boolean;
+        onConfirm: () => void;
+    }>({
+        isOpen: false,
+        title: '',
+        message: '',
+        onConfirm: () => { },
+    });
+
+    // Data State - from hooks (scope='videos' for separate folders from channel-assets)
+    const { folders, createFolder, renameFolder, deleteFolder } = useFolders('videos');
+    const { videos: videoAssets, setVideos: setVideoAssets, saveVideos, deleteVideo, clearAllVideos, fetchVideos, updateVideoFolder } = useVideos();
+    const [isLoading, setIsLoading] = useState(false);
 
     // DnD State
     const [activeId, setActiveId] = useState<string | null>(null);
@@ -73,33 +90,58 @@ export default function VideoAssetsPage() {
 
     // Helper: Extract YouTube ID
     const getYoutubeId = (url: string) => {
-        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|\&v=)([^#\&\?]*).*/;
         const match = url.match(regExp);
-        return (match && match[2].length === 11) ? match[2] : null;
+        return (match && match[2].length >= 11) ? match[2].slice(0, 11) : null;
     };
 
-    const handleSaveVideo = (url: string) => {
+    // SAVE VIDEO - fetch real video info from YouTube API
+    const handleSaveVideo = async (url: string) => {
         const videoId = getYoutubeId(url);
         if (!videoId) {
             alert('올바른 유튜브 링크가 아닙니다.');
             return;
         }
 
-        const newVideo: Asset = {
-            id: `added-${Date.now()}`,
-            type: 'video',
-            title: `New Video Asset ${videoAssets.length + 1}`,
-            size: '-',
-            updatedAt: new Date().toLocaleDateString('ko-KR').replace(/\. /g, '.').replace(/\.$/, ''),
-            url: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-            folderId: selectedFolderId === 'all' ? 'favorites' : selectedFolderId,
-            views: Math.floor(Math.random() * 1000000), // Mock views
-        };
+        try {
+            // Fetch actual video info from YouTube API
+            const res = await fetch(`/api/youtube/video-info?videoId=${videoId}`);
+            const data = await res.json();
 
-        setVideoAssets(prev => [newVideo, ...prev]);
-        setMoveNotification('영상이 저장되었습니다.');
-        setTimeout(() => setMoveNotification(null), 2000);
-        setIsModalOpen(false);
+            if (!data.ok || !data.video) {
+                alert(data.message || '영상 정보를 가져올 수 없습니다.');
+                return;
+            }
+
+            const videoInfo = data.video;
+            const currentFolderId = selectedFolderId === 'all' ? null : selectedFolderId;
+
+            const newVideo: Asset = {
+                id: `video-${Date.now()}`,
+                type: 'video',
+                title: videoInfo.title,
+                size: '-',
+                createdAt: videoInfo.publishedAt?.split('T')[0] || new Date().toISOString().split('T')[0],
+                updatedAt: new Date().toLocaleDateString(),
+                url: videoInfo.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
+                folderId: currentFolderId || 'all',
+                views: videoInfo.viewCount || 0,
+                channelName: videoInfo.channelTitle || 'Unknown Channel',
+                youtubeVideoId: videoId,
+                youtubeChannelId: videoInfo.channelId // Add channel ID for DB
+            };
+
+            // Save to DB
+            await saveVideos([newVideo]);
+
+            setVideoAssets(prev => [newVideo, ...prev]);
+            setMoveNotification('영상이 저장되었습니다.');
+            setTimeout(() => setMoveNotification(null), 2000);
+            setIsModalOpen(false);
+        } catch (error) {
+            console.error('Error saving video:', error);
+            alert('영상 저장 중 오류가 발생했습니다.');
+        }
     };
 
     // Selection Logic
@@ -136,7 +178,7 @@ export default function VideoAssetsPage() {
     const sensors = useSensors(
         useSensor(PointerSensor, {
             activationConstraint: {
-                distance: 5, // 5px 이상 이동해야 드래그 시작 (클릭과 구분)
+                distance: 5,
             },
         }),
         useSensor(KeyboardSensor, {
@@ -160,7 +202,6 @@ export default function VideoAssetsPage() {
 
             return closestCenter(args);
         } else {
-            // Dragging a FOLDER (reordering folders)
             const centerCollisions = closestCenter(args);
             const filtered = centerCollisions.filter(c => !String(c.id).startsWith('folder:'));
             return filtered.length > 0 ? filtered : centerCollisions;
@@ -197,18 +238,13 @@ export default function VideoAssetsPage() {
             over.data.current?.type === 'FOLDER' ||
             folders.some(f => f.id === overIdStr);
 
+        // Case 1: Reorder Folders (disabled - requires API)
         if (!isActiveAsset && !isOverAsset && isOverFolder) {
-            if (active.id !== over.id) {
-                setFolders((items) => {
-                    const oldIndex = items.findIndex((item) => item.id === active.id);
-                    const newIndex = items.findIndex((item) => item.id === over.id);
-                    if (oldIndex === -1 || newIndex === -1) return items;
-                    return arrayMove(items, oldIndex, newIndex);
-                });
-            }
+            // Folder reordering disabled
             return;
         }
 
+        // Case 2: Reorder Assets (Mock)
         if (isActiveAsset && isOverAsset) {
             if (active.id !== over.id) {
                 setVideoAssets((items) => {
@@ -223,80 +259,44 @@ export default function VideoAssetsPage() {
             return;
         }
 
+        // Case 3: Move to Folder (DB + UI)
         if (isActiveAsset && isOverFolder) {
             const targetFolderId = overIdStr.startsWith('folder:') ? overIdStr.replace('folder:', '') : overIdStr;
             const targetFolder = folders.find(f => f.id === targetFolderId);
             if (!targetFolder) return;
 
             const idsToMove = selectedAssetIds;
+
+            // Optimistic UI update
             setVideoAssets(prev => prev.map(asset => {
                 if (idsToMove.includes(asset.id)) return { ...asset, folderId: targetFolderId };
                 return asset;
             }));
 
+            // Save to DB
+            updateVideoFolder(idsToMove, targetFolderId).then(success => {
+                if (success) {
+                    setMoveNotification(`${targetFolder.name}으로 ${idsToMove.length}개 이동됨`);
+                } else {
+                    // Revert on failure
+                    fetchVideos();
+                    setMoveNotification('이동 실패');
+                }
+                setTimeout(() => setMoveNotification(null), 2000);
+            });
+
             setLastDroppedFolderId(targetFolderId);
             setTimeout(() => setLastDroppedFolderId(null), 1000);
-            setMoveNotification(`${targetFolder.name}으로 ${idsToMove.length}개 이동됨`);
-            setTimeout(() => setMoveNotification(null), 2000);
             setSelectedAssetIds([]);
             setLastSelectedId(null);
         }
     };
 
-    const handleFetchVideos = ({ daysAgo, minViews, limit }: { daysAgo: number; minViews: number; limit: number }) => {
+    const handleFetchVideos = async ({ daysAgo, minViews, limit }: { daysAgo: number; minViews: number; limit: number }) => {
         if (isFetching) return;
         setIsFetching(true);
-
-        const cutoffDate = new Date();
-        cutoffDate.setDate(cutoffDate.getDate() - daysAgo);
-
-        const newAssetCandidates: Asset[] = mockVideos
-            .filter((video) => {
-                const parts = video.publishedAt.split('.');
-                if (parts.length < 3) return false;
-                const videoDate = new Date(
-                    parseInt(parts[0]),
-                    parseInt(parts[1]) - 1,
-                    parseInt(parts[2])
-                );
-                return videoDate >= cutoffDate && video.views >= minViews;
-            })
-            .map((video) => ({
-                id: video.id,
-                type: 'video',
-                title: video.title,
-                size: '-',
-                updatedAt: video.publishedAt,
-                url: video.thumbnailUrl,
-                folderId: selectedFolderId === 'all' ? 'favorites' : selectedFolderId,
-                views: video.views,
-                channelName: video.channelName,
-            }));
-
-        const limitedCandidates = newAssetCandidates.slice(0, limit);
-
-        setTimeout(() => {
-            if (limitedCandidates.length === 0) {
-                setIsFetching(false);
-                return;
-            }
-
-            let index = 0;
-            const intervalId = setInterval(() => {
-                const candidate = limitedCandidates[index];
-                setVideoAssets((prev) => {
-                    const exists = prev.some(a => a.id === candidate.id);
-                    if (exists) return prev;
-                    return [...prev, candidate];
-                });
-
-                index++;
-                if (index >= limitedCandidates.length) {
-                    clearInterval(intervalId);
-                    setIsFetching(false);
-                }
-            }, 100);
-        }, 600);
+        console.log('Fetching videos (Mock)...', { selectedFolderId, daysAgo, minViews, limit });
+        setIsFetching(false);
     };
 
     const activeAssetId = activeId && String(activeId).startsWith('asset:') ? String(activeId).replace('asset:', '') : null;
@@ -311,28 +311,44 @@ export default function VideoAssetsPage() {
     });
     counts['all'] = videoAssets.length;
 
-    const handleRenameFolder = (folderId: string, newName: string) => {
-        setFolders((items) =>
-            items.map((f) => (f.id === folderId ? { ...f, name: newName } : f))
-        );
+    // RENAME FOLDER
+    const handleRenameFolder = async (folderId: string, newName: string): Promise<boolean> => {
+        return await renameFolder(folderId, newName);
     };
 
-    const handleCreateFolder = (newFolder: Folder) => {
-        setFolders((current) => [...current, newFolder]);
+    // CREATE FOLDER - for parent folders
+    const handleCreateParent = async (name: string): Promise<boolean> => {
+        return await createFolder(name, null);
     };
 
-    const handleSelectFolder = (id: string) => {
+    // CREATE FOLDER - for child folders
+    const handleCreateChild = async (name: string, parentId: string): Promise<boolean> => {
+        return await createFolder(name, parentId);
+    };
+
+    // MOVE ASSETS TO FOLDER via Click (DB + UI)
+    const handleSelectFolder = async (id: string) => {
         if (isMoveMode && selectedAssetIds.length > 0) {
             const targetFolder = folders.find(f => f.id === id);
             if (!targetFolder || id === 'all') return;
 
+            // Optimistic UI update
             setVideoAssets(prev => prev.map(asset => {
                 if (selectedAssetIds.includes(asset.id)) return { ...asset, folderId: id };
                 return asset;
             }));
 
-            setMoveNotification(`${targetFolder.name}으로 ${selectedAssetIds.length}개 이동됨`);
+            // Save to DB
+            const success = await updateVideoFolder(selectedAssetIds, id);
+            if (success) {
+                setMoveNotification(`${targetFolder.name}으로 ${selectedAssetIds.length}개 이동됨`);
+            } else {
+                // Revert on failure
+                fetchVideos();
+                setMoveNotification('이동 실패');
+            }
             setTimeout(() => setMoveNotification(null), 2000);
+
             setSelectedAssetIds([]);
             setIsMoveMode(false);
             return;
@@ -340,32 +356,57 @@ export default function VideoAssetsPage() {
         setSelectedFolderId(id);
     };
 
-    const handleDeleteFolder = (folderId: string) => {
-        setFolders((prev) => {
-            const folderToDelete = prev.find(f => f.id === folderId);
-            if (!folderToDelete) return prev;
-            const idsToDelete = [folderId];
-            if (folderToDelete.parentId === null) {
-                const childIds = prev.filter(f => f.parentId === folderId).map(f => f.id);
-                idsToDelete.push(...childIds);
+    // DELETE FOLDER
+    const handleDeleteFolder = async (folderId: string): Promise<boolean> => {
+        const result = await deleteFolder(folderId);
+        if (result && folderId === selectedFolderId) {
+            setSelectedFolderId('all');
+        }
+        return result;
+    };
+
+    // DELETE SELECTED (Mock)
+    const handleDeleteSelected = async () => {
+        if (selectedAssetIds.length === 0) return;
+
+        setConfirmData({
+            isOpen: true,
+            title: '선택 항목 삭제',
+            message: `선택한 ${selectedAssetIds.length}개의 에셋을 삭제하시겠습니까?`,
+            isDestructive: true,
+            confirmText: '삭제',
+            onConfirm: async () => {
+                // Delete from DB
+                for (const id of selectedAssetIds) {
+                    await deleteVideo(id);
+                }
+                setMoveNotification(`${selectedAssetIds.length}개 삭제됨`);
+                setTimeout(() => setMoveNotification(null), 2000);
+                setSelectedAssetIds([]);
+                setLastSelectedId(null);
+                setIsMoveMode(false);
             }
-            if (idsToDelete.includes(selectedFolderId)) {
-                setSelectedFolderId('all');
-            }
-            return prev.filter(f => !idsToDelete.includes(f.id));
         });
     };
 
-    const handleDeleteSelected = () => {
-        if (selectedAssetIds.length === 0) return;
-        if (confirm(`${selectedAssetIds.length}개의 에셋을 삭제하시겠습니까?`)) {
-            setVideoAssets(prev => prev.filter(asset => !selectedAssetIds.includes(asset.id)));
-            setMoveNotification(`${selectedAssetIds.length}개 삭제됨`);
-            setTimeout(() => setMoveNotification(null), 2000);
-            setSelectedAssetIds([]);
-            setLastSelectedId(null);
-            setIsMoveMode(false);
-        }
+    // DELETE SINGLE
+    const handleDeleteSingle = async (id: string) => {
+        const asset = videoAssets.find(a => a.id === id);
+        if (!asset) return;
+
+        setConfirmData({
+            isOpen: true,
+            title: '영상 삭제',
+            message: `"${asset.title}"을(를) 삭제하시겠습니까?`,
+            isDestructive: true,
+            confirmText: '삭제',
+            onConfirm: async () => {
+                await deleteVideo(id);
+                setMoveNotification('삭제됨');
+                setTimeout(() => setMoveNotification(null), 2000);
+                setSelectedAssetIds(prev => prev.filter(assetId => assetId !== id));
+            }
+        });
     };
 
     const handleDeselect = (e: React.MouseEvent) => {
@@ -381,9 +422,13 @@ export default function VideoAssetsPage() {
     const handleDoubleClick = (asset: Asset) => {
         let targetUrl = '';
         if (asset.type === 'channel') {
-            targetUrl = asset.channelUrl || `https://youtube.com/channel/${asset.id}`;
+            const channelId = asset.youtubeChannelId || (asset.id.startsWith('channel-') ? asset.id.split('-')[1] : asset.id);
+            targetUrl = asset.channelUrl || `https://youtube.com/channel/${channelId}`;
         } else if (asset.type === 'video') {
-            const videoId = asset.id.startsWith('added-') ? asset.id.split('-')[1] : asset.id;
+            const videoId = asset.youtubeVideoId ||
+                (asset.id.startsWith('added-') || asset.id.startsWith('video-')
+                    ? asset.id.split('-')[1]
+                    : asset.id);
             targetUrl = `https://youtube.com/watch?v=${videoId}`;
         }
         if (targetUrl) {
@@ -395,7 +440,6 @@ export default function VideoAssetsPage() {
         <div className="min-h-screen bg-gray-50 dark:bg-black" onClick={handleDeselect}>
             <Header />
             <FilterBar onFetchVideos={handleFetchVideos} isFetching={isFetching} />
-
 
             <ClientOnly>
                 <DndContext
@@ -414,7 +458,8 @@ export default function VideoAssetsPage() {
                                         onSelect={handleSelectFolder}
                                         onRename={handleRenameFolder}
                                         onDelete={handleDeleteFolder}
-                                        onCreateFolder={handleCreateFolder}
+                                        onCreateParent={handleCreateParent}
+                                        onCreateChild={handleCreateChild}
                                         lastDroppedFolderId={lastDroppedFolderId}
                                         counts={counts}
                                         activeType={activeType}
@@ -471,6 +516,7 @@ export default function VideoAssetsPage() {
                                                 isSelected={selectedAssetIds.includes(asset.id)}
                                                 onClick={handleAssetClick}
                                                 onDoubleClick={() => handleDoubleClick(asset)}
+                                                onDelete={() => handleDeleteSingle(asset.id)}
                                             />
                                         ))}
                                     </SortableContext>
@@ -515,6 +561,16 @@ export default function VideoAssetsPage() {
                 isOpen={isModalOpen}
                 onClose={() => setIsModalOpen(false)}
                 onSave={handleSaveVideo}
+            />
+
+            <ConfirmModal
+                isOpen={confirmData.isOpen}
+                onClose={() => setConfirmData(prev => ({ ...prev, isOpen: false }))}
+                onConfirm={confirmData.onConfirm}
+                title={confirmData.title}
+                message={confirmData.message}
+                confirmText={confirmData.confirmText}
+                isDestructive={confirmData.isDestructive}
             />
         </div>
     );

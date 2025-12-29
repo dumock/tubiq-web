@@ -56,15 +56,20 @@ export default function GrowthChart() {
             <div className="mb-6 flex items-center justify-between">
                 <div>
                     <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                        일일 조회수 추이
+                        전체 채널 조회수 트렌드
                     </h3>
                     <p className="text-sm text-gray-500 dark:text-gray-400">
-                        최근 일일 조회수 및 유기적 트래픽 추이
+                        최근 30일 기준 수집 대상 전체 채널의 평균 조회수 추이
                     </p>
                 </div>
-                <div className="flex items-center gap-2 rounded-lg bg-green-50 px-3 py-1 text-sm font-medium text-green-700 dark:bg-green-900/20 dark:text-green-400">
-                    <ArrowUpRight className="h-4 w-4" />
-                    <span>+24.5%</span>
+                <div className="flex flex-col items-end gap-1">
+                    <div className="flex items-center gap-2 rounded-lg bg-green-50 px-3 py-1 text-sm font-medium text-green-700 dark:bg-green-900/20 dark:text-green-400">
+                        <ArrowUpRight className="h-4 w-4" />
+                        <span>+24.5%</span>
+                    </div>
+                    <span className="text-[10px] text-gray-400 dark:text-gray-500">
+                        전 기간 대비 전체 평균
+                    </span>
                 </div>
             </div>
 

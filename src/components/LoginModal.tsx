@@ -1,17 +1,25 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Mail, Lock, ChevronRight, Github, Chrome, X } from 'lucide-react';
+import { Mail, Lock, ChevronRight, Github, Chrome, X, AlertCircle, Loader2 } from 'lucide-react';
+import { supabase } from '@/lib/supabase';
 
 interface LoginModalProps {
     isOpen: boolean;
     onClose: () => void;
     onLoginSuccess?: () => void;
+    onOpenSignUp?: () => void;
 }
 
-export default function LoginModal({ isOpen, onClose, onLoginSuccess }: LoginModalProps) {
+export default function LoginModal({ isOpen, onClose, onLoginSuccess, onOpenSignUp }: LoginModalProps) {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
+    const [error, setError] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(false);
+
+    useEffect(() => {
+        if (isOpen) setError(null);
+    }, [isOpen]);
 
     // Close on escape key
     useEffect(() => {
@@ -24,11 +32,61 @@ export default function LoginModal({ isOpen, onClose, onLoginSuccess }: LoginMod
 
     if (!isOpen) return null;
 
-    const handleSubmit = (e: React.FormEvent) => {
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        console.log('Login attempt:', { email, password });
-        // Simplified login for demo: any input works
-        onLoginSuccess?.();
+        setError(null);
+        setIsLoading(true);
+
+        try {
+            const { data, error: authError } = await supabase.auth.signInWithPassword({
+                email,
+                password,
+            });
+
+            if (authError) {
+                if (authError.message.includes('Email not confirmed')) {
+                    setError('인증되지 않은 이메일입니다. 메일함을 확인해주세요.');
+                } else {
+                    setError(authError.message);
+                }
+                return;
+            }
+
+            if (!data.session?.access_token) {
+                setError('인증에 실패했습니다. 세션 정보를 가져올 수 없습니다.');
+                return;
+            }
+
+            onLoginSuccess?.();
+        } catch (err: any) {
+            setError(err.message || '로그인 중 오류가 발생했습니다.');
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleResendEmail = async () => {
+        if (!email) {
+            setError('이메일을 입력해주세요.');
+            return;
+        }
+        setIsLoading(true);
+        setError(null);
+        try {
+            const { error: resendError } = await supabase.auth.resend({
+                type: 'signup',
+                email: email,
+            });
+            if (resendError) {
+                setError(resendError.message);
+            } else {
+                setError('인증 메일이 재발송되었습니다. 메일함을 확인해주세요.');
+            }
+        } catch (err: any) {
+            setError(err.message || '재발송 중 오류가 발생했습니다.');
+        } finally {
+            setIsLoading(false);
+        }
     };
 
     return (
@@ -71,6 +129,24 @@ export default function LoginModal({ isOpen, onClose, onLoginSuccess }: LoginMod
                             </p>
                         </div>
                     </div>
+
+                    {error && (
+                        <div className="mb-6 rounded-xl bg-red-50 p-4 text-sm text-red-600 dark:bg-red-900/10 dark:text-red-400 animate-in fade-in slide-in-from-top-2 duration-200">
+                            <div className="flex items-center gap-3">
+                                <AlertCircle className="h-5 w-5 flex-shrink-0" />
+                                <p className="font-medium flex-1">{error}</p>
+                            </div>
+                            {error.includes('인증되지 않은 이메일') && (
+                                <button
+                                    onClick={handleResendEmail}
+                                    disabled={isLoading}
+                                    className="mt-3 w-full text-xs font-bold text-red-700 underline hover:text-red-800 dark:text-red-300 flex items-center justify-center gap-1"
+                                >
+                                    인증 메일 다시 보내기
+                                </button>
+                            )}
+                        </div>
+                    )}
 
                     <form className="space-y-4" onSubmit={handleSubmit}>
                         <div>
@@ -131,10 +207,20 @@ export default function LoginModal({ isOpen, onClose, onLoginSuccess }: LoginMod
 
                         <button
                             type="submit"
-                            className="w-full flex justify-center items-center py-3.5 px-4 border border-transparent rounded-xl shadow-sm text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-all active:scale-[0.98] mt-2"
+                            disabled={isLoading}
+                            className="w-full flex justify-center items-center py-3.5 px-4 border border-transparent rounded-xl shadow-sm text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-all active:scale-[0.98] mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
                         >
-                            로그인하기
-                            <ChevronRight className="ml-2 h-4 w-4" />
+                            {isLoading ? (
+                                <>
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    로그인 중...
+                                </>
+                            ) : (
+                                <>
+                                    로그인하기
+                                    <ChevronRight className="ml-2 h-4 w-4" />
+                                </>
+                            )}
                         </button>
                     </form>
 
@@ -164,7 +250,12 @@ export default function LoginModal({ isOpen, onClose, onLoginSuccess }: LoginMod
 
                     <p className="mt-8 text-center text-xs text-gray-400">
                         아직 계정이 없으신가요?{' '}
-                        <button className="font-bold text-indigo-600 dark:text-indigo-400 hover:underline">회원가입</button>
+                        <button
+                            onClick={onOpenSignUp}
+                            className="font-bold text-indigo-600 dark:text-indigo-400 hover:underline"
+                        >
+                            회원가입
+                        </button>
                     </p>
                 </div>
             </div>

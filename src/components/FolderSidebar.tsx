@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Folder as FolderIcon, FolderDot, Plus, GripVertical, Pencil, ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
-import { Folder } from '../mock/folders';
+import { Folder } from '@/types';
 import {
     useDroppable,
 } from '@dnd-kit/core';
@@ -18,9 +18,10 @@ interface FolderSidebarProps {
     counts: Record<string, number>;
     selectedFolderId: string;
     onSelect: (folderId: string) => void;
-    onRename: (folderId: string, newName: string) => void;
-    onDelete: (folderId: string) => void;
-    onCreateFolder: (folder: Folder) => void;
+    onRename: (folderId: string, newName: string) => Promise<boolean>;
+    onDelete: (folderId: string) => Promise<boolean>;
+    onCreateParent: (name: string) => Promise<boolean>;
+    onCreateChild: (name: string, parentId: string) => Promise<boolean>;
     lastDroppedFolderId?: string | null;
     activeType?: 'FOLDER' | 'ASSET' | null;
 }
@@ -272,9 +273,15 @@ function FolderItem({
     );
 }
 
-export default function FolderSidebar({ folders, counts, selectedFolderId, onSelect, onRename, onDelete, onCreateFolder, lastDroppedFolderId, activeType }: FolderSidebarProps) {
+export default function FolderSidebar({ folders, counts, selectedFolderId, onSelect, onRename, onDelete, onCreateParent, onCreateChild, lastDroppedFolderId, activeType }: FolderSidebarProps) {
     const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
     const [justCreatedId, setJustCreatedId] = useState<string | null>(null);
+
+    // Inline folder creation state
+    const [newFolderMode, setNewFolderMode] = useState<'parent' | 'child' | null>(null);
+    const [newFolderName, setNewFolderName] = useState('');
+    const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
+    const newFolderInputRef = React.useRef<HTMLInputElement>(null);
 
     useEffect(() => {
         if (justCreatedId) {
@@ -302,18 +309,17 @@ export default function FolderSidebar({ folders, counts, selectedFolderId, onSel
 
     const isParentFolder = (id: string) => parentFolders.some(f => f.id === id);
 
+    // Focus input when entering create mode
+    useEffect(() => {
+        if (newFolderMode && newFolderInputRef.current) {
+            newFolderInputRef.current.focus();
+        }
+    }, [newFolderMode]);
+
     const handleAddParent = () => {
-        const newId = crypto.randomUUID();
-        const newFolder: Folder = {
-            id: newId,
-            name: '새 폴더',
-            order: parentFolders.length + 1,
-            createdAt: new Date().toISOString(),
-            parentId: null
-        };
-        onCreateFolder(newFolder);
-        onSelect(newId); // Immediately select the new folder
-        setJustCreatedId(newId);
+        setNewFolderMode('parent');
+        setNewFolderName('');
+        setNewFolderParentId(null);
     };
 
     const handleAddChild = () => {
@@ -334,17 +340,35 @@ export default function FolderSidebar({ folders, counts, selectedFolderId, onSel
             toggleFolder(selectedFolderId);
         }
 
-        const newId = crypto.randomUUID();
-        const newFolder: Folder = {
-            id: newId,
-            name: '새 폴더',
-            order: 999,
-            createdAt: new Date().toISOString(),
-            parentId: selectedFolderId // Strict: parentId is the selected parent ID
-        };
-        onCreateFolder(newFolder);
-        onSelect(newId); // Immediately select the new folder
-        setJustCreatedId(newId);
+        setNewFolderMode('child');
+        setNewFolderName('');
+        setNewFolderParentId(selectedFolderId);
+    };
+
+    const handleNewFolderSubmit = async () => {
+        if (!newFolderName.trim()) {
+            setNewFolderMode(null);
+            return;
+        }
+
+        if (newFolderMode === 'parent') {
+            await onCreateParent(newFolderName.trim());
+        } else if (newFolderMode === 'child' && newFolderParentId) {
+            await onCreateChild(newFolderName.trim(), newFolderParentId);
+        }
+
+        setNewFolderMode(null);
+        setNewFolderName('');
+        setNewFolderParentId(null);
+    };
+
+    const handleNewFolderKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter') {
+            handleNewFolderSubmit();
+        } else if (e.key === 'Escape') {
+            setNewFolderMode(null);
+            setNewFolderName('');
+        }
     };
 
     // Construction of the flattened list for Dnd-Kit SortableContext
@@ -417,6 +441,21 @@ export default function FolderSidebar({ folders, counts, selectedFolderId, onSel
                                 activeType={activeType}
                             />
                         ))}
+
+                        {/* Inline New Folder Input */}
+                        {newFolderMode && (
+                            <div className={`flex items-center py-2 ${newFolderMode === 'child' ? 'pl-8' : 'pl-1'}`}>
+                                <input
+                                    ref={newFolderInputRef}
+                                    value={newFolderName}
+                                    onChange={(e) => setNewFolderName(e.target.value)}
+                                    onBlur={handleNewFolderSubmit}
+                                    onKeyDown={handleNewFolderKeyDown}
+                                    placeholder={newFolderMode === 'parent' ? '새 폴더명' : '하위 폴더명'}
+                                    className="h-9 w-full rounded-lg border border-indigo-300 bg-white px-3 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30 dark:border-indigo-600 dark:bg-zinc-900 dark:text-gray-200"
+                                />
+                            </div>
+                        )}
                     </SortableContext>
                 </div>
             </div>
