@@ -373,6 +373,8 @@ def on_startup():
     print("[INIT] Startup complete (MongoDB dependencies removed).")
     print(f"[CONFIG] SUPABASE_TABLE_VIDEOS={SUPABASE_TABLE_VIDEOS} SUPABASE_VIDEOS_MODE={SUPABASE_VIDEOS_MODE}")
     print(f"[CONFIG] SUPABASE_UPSERT_ON_CONFLICT={SUPABASE_UPSERT_ON_CONFLICT}")
+    print(f"[CONFIG] SUPABASE_URL={SUPABASE_URL}")
+    print(f"[CONFIG] SUPABASE_KEY_LEN={len(SUPABASE_SERVICE_ROLE_KEY) if SUPABASE_SERVICE_ROLE_KEY else 0}")
 
 @app.get("/")
 def root():
