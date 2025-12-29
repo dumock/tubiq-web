@@ -233,7 +233,14 @@ function transformRelayToVideoDb(relayRow, meta, internalChannelId, qsharerFolde
     folder_id: qsharerFolderId || relayRow.folder_id || null,
 
     // Use added_at column
-    added_at: relayRow.collected_at ?? new Date().toISOString()
+    added_at: relayRow.collected_at ?? new Date().toISOString(),
+
+    // Required by DB (re-adding these as they are marked NOT NULL in user's DB)
+    account_id: relayRow.account_id || relayRow.user_id,
+    platform: relayRow.platform || 'youtube',
+    external_id: relayRow.external_id,
+    url: relayRow.url || `https://www.youtube.com/watch?v=${relayRow.external_id}`,
+    source: relayRow.source || 'qsharer-app'
   };
 }
 

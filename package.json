@@ -1,16 +1,37 @@
 {
-  "name": "tubiq-monorepo",
+  "name": "tubiq-web",
+  "version": "0.1.0",
   "private": true,
   "workspaces": [
     "collector-worker",
-    "crawler-worker"
+    "crawler-worker",
+    "relay-metadata-worker"
   ],
   "scripts": {
-    "build": "echo \"no build\"",
-    "start": "node worker-runner.cjs"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "worker:start": "node worker-runner.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
-    "node-fetch": "^3.3.2"
+    "lucide-react": "^0.562.0",
+    "next": "16.1.0",
+    "node-fetch": "^3.3.2",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "recharts": "^3.6.0",
+    "zustand": "^5.0.9"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.0",
+    "tailwindcss": "^4",
+    "typescript": "^5"
   }
 }
