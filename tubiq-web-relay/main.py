@@ -234,6 +234,7 @@ class ShareIn(BaseModel):
     normalized_video_id: Optional[str] = None
     source: Optional[str] = None
     ts: Optional[int] = None
+    memo: Optional[str] = None  # ✅ NEW: memo from Q-Sharer app
 
 # ---------- SSE 채널 ----------
 _channels: Dict[str, asyncio.Queue[str]] = {}
@@ -351,7 +352,7 @@ async def supabase_upsert_item(*, table: str, row: Dict[str, Any], on_conflict: 
 
     return False, f"supabase_http_400: column_mismatch_auto_removed={removed} but still failing"
 
-def _build_supabase_row_for_relay(*, route_id: str, platform: str, external_id: str, url_norm: str, source: str, created_at_ms: int) -> Dict[str, Any]:
+def _build_supabase_row_for_relay(*, route_id: str, platform: str, external_id: str, url_norm: str, source: str, created_at_ms: int, memo: Optional[str] = None) -> Dict[str, Any]:
     row = {
         "account_id": route_id,
         "platform": platform,
@@ -359,6 +360,7 @@ def _build_supabase_row_for_relay(*, route_id: str, platform: str, external_id: 
         "url": url_norm,
         "source": source,
         "created_at": created_at_ms,
+        "memo": memo,  # ✅ NEW: memo field
     }
     if is_valid_uuid(route_id):
         row["user_id"] = route_id
@@ -442,6 +444,7 @@ async def share(data: ShareIn = Body(...), user=Depends(require_user), req: Requ
                 url_norm=url_norm,
                 source=(data.source or "android_sharer"),
                 created_at_ms=created_at_ms,
+                memo=data.memo,  # ✅ NEW
             )
         else:
             if SUPABASE_VIDEOS_MODE == "web":
@@ -464,6 +467,7 @@ async def share(data: ShareIn = Body(...), user=Depends(require_user), req: Requ
                     url_norm=url_norm,
                     source=(data.source or "android_sharer"),
                     created_at_ms=created_at_ms,
+                    memo=data.memo,  # ✅ NEW
                 )
 
         if supa_row:

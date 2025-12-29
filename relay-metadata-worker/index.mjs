@@ -229,6 +229,9 @@ function transformRelayToVideoDb(relayRow, meta, internalChannelId, qsharerFolde
     published_at: meta.published_at ?? relayRow.published_at ?? null,
     channel_name: meta.channel_name ?? relayRow.channel_name ?? null,
 
+    // ✅ NEW: memo from Q-Sharer app
+    memo: relayRow.memo || null,
+
     // Auto folder assignment
     folder_id: qsharerFolderId || relayRow.folder_id || null,
 
@@ -453,7 +456,7 @@ async function processIncompleteChannels() {
 }
 
 export async function main() {
-  console.log("🧩 relay-metadata-worker started (Mode: Realtime Only)");
+  console.log("🧩 relay-metadata-worker started (Mode: Realtime + Polling Fallback)");
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
     console.error(
       "[relay-metadata-worker] missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY"
@@ -495,7 +498,18 @@ export async function main() {
       console.log(`[relay-metadata-worker] Realtime subscription status: ${status}`);
     });
 
-  console.log("[relay-metadata-worker] Waiting for real-time events...");
+  // 4) 🆕 Polling fallback: Process every N seconds regardless of Realtime status
+  // This ensures data is processed even when Realtime connection fails (CHANNEL_ERROR)
+  setInterval(async () => {
+    try {
+      await processOnce();
+      await processIncompleteChannels();
+    } catch (e) {
+      console.error("[relay-metadata-worker] Polling cycle error:", e);
+    }
+  }, pollIntervalSec * 1000);
+
+  console.log(`[relay-metadata-worker] Waiting for real-time events... (Polling fallback every ${pollIntervalSec}s)`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

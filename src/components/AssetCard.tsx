@@ -271,6 +271,19 @@ export default function AssetCard({ asset, variant = 'default', isSelected, onDo
                                                 {asset.channelName}
                                             </p>
                                         )}
+                                        {/* ✅ Memo indicator with tooltip */}
+                                        {asset.memo && (
+                                            <div className="group/memo relative mt-2">
+                                                <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 px-2 py-0.5 rounded-md cursor-help">
+                                                    📝 메모
+                                                </span>
+                                                {/* Tooltip on hover */}
+                                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-gray-900 dark:bg-zinc-700 text-white text-xs rounded-lg opacity-0 invisible group-hover/memo:opacity-100 group-hover/memo:visible transition-all duration-200 z-50 shadow-lg">
+                                                    <p className="break-words whitespace-pre-wrap">{asset.memo}</p>
+                                                    <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900 dark:border-t-zinc-700"></div>
+                                                </div>
+                                            </div>
+                                        )}
                                     </>
                                 )}
                             </div>

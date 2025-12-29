@@ -19,6 +19,7 @@ export interface Asset {
     publishedAt?: string;
     viewCount?: number;
     videoCount?: number;
+    memo?: string; // ✅ NEW: memo from Q-Sharer app
 }
 
 export interface Folder {

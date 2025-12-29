@@ -16,6 +16,7 @@ interface DbVideo {
     channels: { title: string } | null;
     channel_name: string | null;
     folder_id: string | null;
+    memo: string | null; // ✅ NEW
 }
 
 function mapDbToAsset(v: DbVideo): Asset {
@@ -31,7 +32,8 @@ function mapDbToAsset(v: DbVideo): Asset {
         updatedAt: v.collected_at?.split('T')[0] || '',
         url: v.thumbnail_url,
         folderId: v.folder_id || 'all', // Use DB folder_id
-        youtubeVideoId: v.youtube_video_id
+        youtubeVideoId: v.youtube_video_id,
+        memo: v.memo || undefined // ✅ NEW
     };
 }
 
