@@ -1,0 +1,8 @@
+name: relay-metadata-worker
+app: node@22
+env:
+  - WORKER_ROLE: "relay-metadata"
+  - SUPABASE_URL: "${SUPABASE_URL}"
+  - SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY}"
+  - YOUTUBE_API_KEY_1: "${YOUTUBE_API_KEY_1}"
+command: node worker-runner.cjs
