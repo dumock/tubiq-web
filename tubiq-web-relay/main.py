@@ -6,7 +6,7 @@
 # - ✅ SSE: Real-time only (No replay history)
 # ---------------------------------------------------------------------------
 
-import os, time, json, hashlib, asyncio, logging, re
+import os, time, json, hashlib, asyncio, logging, re, uuid
 from typing import List, Optional, Dict, Any, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, Body, Depends, Request
@@ -340,15 +340,21 @@ async def supabase_upsert_item(*, table: str, row: Dict[str, Any], on_conflict: 
     return False, f"supabase_http_400: column_mismatch_auto_removed={removed} but still failing"
 
 def _build_supabase_row_for_relay(*, route_id: str, platform: str, external_id: str, url_norm: str, source: str, created_at_ms: int) -> Dict[str, Any]:
-    return {
+    row = {
         "account_id": route_id,
-        "user_id": route_id, # Added for worker compatibility
         "platform": platform,
         "external_id": external_id,
         "url": url_norm,
         "source": source,
         "created_at": created_at_ms,
     }
+    if is_valid_uuid(route_id):
+        row["user_id"] = route_id
+    else:
+        # If not UUID, we still want to save it to relay_videos 
+        # but user_id column (UUID) must be omitted or null.
+        row["user_id"] = None
+    return row
 
 def _build_supabase_row_for_web_videos(*, platform: str, external_id: str, source: str, created_at_ms: int) -> Tuple[Dict[str, Any], Optional[str]]:
     if platform != "youtube":
