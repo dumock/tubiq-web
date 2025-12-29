@@ -268,8 +268,12 @@ def _looks_like_unique_violation(err_text: str) -> bool:
     return ("23505" in err_text) or ("duplicate key value violates unique constraint" in err_text)
 
 async def _supabase_post(*, url: str, headers: Dict[str, str], params: Dict[str, str], payload: Dict[str, Any]) -> httpx.Response:
+    print(f"[SUPA] POST {url} with payload {json.dumps(payload)[:200]}...")
     async with httpx.AsyncClient(timeout=SUPABASE_TIMEOUT_SEC) as client:
         resp = await client.post(url, headers=headers, params=params, json=[payload])
+        print(f"[SUPA] Response: {resp.status_code}")
+        if resp.status_code >= 400:
+            print(f"[SUPA] Error Body: {resp.text}")
         return resp
 
 async def supabase_upsert_item(*, table: str, row: Dict[str, Any], on_conflict: str) -> Tuple[bool, Optional[str]]:
@@ -468,6 +472,10 @@ async def share(data: ShareIn = Body(...), user=Depends(require_user), req: Requ
                 row=supa_row,
                 on_conflict=SUPABASE_UPSERT_ON_CONFLICT,
             )
+            if not supa_ok:
+                print(f"[SHARE] Supabase Save FAILED for {external_id}: {supa_err}")
+            else:
+                print(f"[SHARE] Supabase Save SUCCESS for {external_id}")
 
     event_name = "channel_added" if kind == "channel" else "video_added"
     payload = {
