@@ -399,8 +399,61 @@ async function processOnce() {
   console.log(`[relay-metadata-worker] processed: ${processedIds.length}`);
 }
 
+/**
+ * Process channels that have missing metadata (title, thumbnail, etc.)
+ */
+async function processIncompleteChannels() {
+  const { data: incomplete, error } = await supabase
+    .from("channels")
+    .select("*")
+    .or("title.is.null,thumbnail_url.is.null")
+    .limit(batchSize);
+
+  if (error) {
+    console.error("[relay-metadata-worker] Failed to fetch incomplete channels:", error);
+    return;
+  }
+
+  if (!incomplete?.length) return;
+
+  const channelIds = incomplete.map(c => c.youtube_channel_id || c.external_id).filter(Boolean);
+  if (!channelIds.length) return;
+
+  console.log(`[relay-metadata-worker] Resolving metadata for ${incomplete.length} channels...`);
+
+  try {
+    const channelMeta = await fetchYoutubeChannels(channelIds);
+
+    for (const row of incomplete) {
+      const extId = row.youtube_channel_id || row.external_id;
+      const meta = channelMeta.get(extId);
+
+      if (meta) {
+        const updatePayload = {
+          title: meta.title || row.title,
+          thumbnail_url: meta.thumbnailUrl || row.thumbnail_url,
+          subscriber_count: meta.subscriberCount || row.subscriber_count || 0,
+          channel_created_at: meta.snippet?.publishedAt ? meta.snippet.publishedAt.split('T')[0] : (row.channel_created_at || null),
+          status: 'active'
+        };
+
+        const { error: updateErr } = await supabase
+          .from("channels")
+          .update(updatePayload)
+          .eq("id", row.id);
+
+        if (updateErr) {
+          console.error(`[relay-metadata-worker] Failed to update channel ${row.id}:`, updateErr);
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[relay-metadata-worker] Channel resolution error:", e);
+  }
+}
+
 export async function main() {
-  console.log("🧩 relay-metadata-worker started (Mode: Realtime + Polling Fallback)");
+  console.log("🧩 relay-metadata-worker started (Mode: Realtime Only)");
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
     console.error(
       "[relay-metadata-worker] missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY"
@@ -412,16 +465,30 @@ export async function main() {
 
   // 1) 초기 1회 실행 (기존 미처리 건 처리)
   await processOnce();
+  await processIncompleteChannels();
 
-  // 2) 실시간 리스너 설정 (데이터가 들어오면 바로 실행)
+  // 2) 실시간 리스너 설정: Videos
   supabase
     .channel("relay-videos-changes")
     .on(
       "postgres_changes",
       { event: "INSERT", schema: "public", table: RELAY_TABLE },
       async (payload) => {
-        console.log("[relay-metadata-worker] New row detected! Processing...");
+        console.log("[relay-metadata-worker] New relay_video detected! Processing...");
         await processOnce();
+      }
+    )
+    .subscribe();
+
+  // 3) 실시간 리스너 설정: Channels
+  supabase
+    .channel("channels-changes")
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "channels" },
+      async (payload) => {
+        console.log("[relay-metadata-worker] New channel detected! Resolving metadata...");
+        await processIncompleteChannels();
       }
     )
     .subscribe((status) => {

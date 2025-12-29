@@ -161,9 +161,40 @@ export default function ChannelAssetsPage() {
         }
     };
 
-    // Initial Data Load (API)
+    // Initial Data Load (API) and Real-time Subscription
     useEffect(() => {
         fetchChannels();
+
+        // Subscribe to user_channels changes
+        const userChannelsChannel = supabase
+            .channel('user-channels-realtime')
+            .on(
+                'postgres_changes',
+                { event: '*', schema: 'public', table: 'user_channels' },
+                () => {
+                    console.log('Real-time update: user_channels changed');
+                    fetchChannels();
+                }
+            )
+            .subscribe();
+
+        // Subscribe to global channels changes (for metadata updates)
+        const globalChannelsChannel = supabase
+            .channel('global-channels-realtime')
+            .on(
+                'postgres_changes',
+                { event: 'UPDATE', schema: 'public', table: 'channels' },
+                () => {
+                    console.log('Real-time update: channels metadata updated');
+                    fetchChannels();
+                }
+            )
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(userChannelsChannel);
+            supabase.removeChannel(globalChannelsChannel);
+        };
     }, []);
 
     // DnD State
