@@ -264,7 +264,7 @@ export default function AssetCard({ asset, variant = 'default', isSelected, onDo
                                         <p className="mt-1 w-full truncate text-[11px] text-gray-500 dark:text-gray-400">
                                             {asset.type === 'video' && asset.views !== undefined
                                                 ? `조회수 ${formatCompactNumber(asset.views)}`
-                                                : asset.size} • {asset.updatedAt}
+                                                : asset.size} • {asset.type === 'video' ? (asset.createdAt ? formatDate(asset.createdAt) : asset.updatedAt) : asset.updatedAt}
                                         </p>
                                         {asset.channelName && (
                                             <p className="mt-2 w-full truncate text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/20 px-2 py-0.5 rounded-md">
