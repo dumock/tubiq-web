@@ -1,27 +1,8 @@
-name: collector-worker
-app: nodejs@18
-env:
-  - WORKER_ROLE: "collector"
-command: node worker-runner.cjs
----
-name: relay-metadata-worker
-app: nodejs@18
-env:
-  - WORKER_ROLE: "relay-metadata"
-command: node worker-runner.cjs
----
-name: crawler-worker
-app: nodejs@18
-env:
-  - WORKER_ROLE: "crawler"
-command: node worker-runner.cjs
----
 name: tubiq-web-relay
 app: python@3.11
 version: v2
 command: python main.py
 start: python main.py
-context: tubiq-web-relay
 port: 8080
 env:
   - SUPABASE_URL: "${SUPABASE_URL}"
@@ -30,3 +11,5 @@ env:
   - SUPABASE_UPSERT_ON_CONFLICT: "account_id,platform,external_id"
   - SUPABASE_VIDEOS_MODE: "relay"
   - PORT: "8080"
+command: python main.py
+port: 8080

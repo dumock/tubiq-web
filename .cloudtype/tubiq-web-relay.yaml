@@ -1,0 +1,12 @@
+name: tubiq-web-relay
+app: python@3.11
+version: v2
+env:
+  - SUPABASE_URL: "${SUPABASE_URL}"
+  - SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY}"
+  - SUPABASE_TABLE_VIDEOS: "relay_videos"
+  - SUPABASE_UPSERT_ON_CONFLICT: "account_id,platform,external_id"
+  - SUPABASE_VIDEOS_MODE: "relay"
+  - PORT: "8080"
+command: python main.py
+port: 8080
