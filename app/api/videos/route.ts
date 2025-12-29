@@ -146,12 +146,13 @@ export async function POST(request: Request) {
             payloads.push({
                 youtube_video_id: v.youtube_video_id,
                 channel_id: channelUuid,
+                channel_name: v.channel_name || 'Unknown', // Fallback
                 title: v.title,
                 thumbnail_url: v.thumbnail_url,
                 view_count: v.view_count || 0,
                 published_at: v.published_at,
                 user_id: user.id,
-                collected_at: new Date().toISOString(),
+                collected_at: v.collected_at || new Date().toISOString(),
                 folder_id: qsharerFolderId || v.folder_id || null, // Use QSharer folder if from app
                 // New columns required by DB
                 account_id: user.id, // Linked to user's main account ID

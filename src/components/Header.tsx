@@ -3,10 +3,12 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Search, Bell, Menu, User, LayoutGrid, BarChart3, Folder, FileVideo, Database, Search as SearchIcon, X, TrendingUp } from 'lucide-react';
+import { Search, Bell, Menu, User, LayoutGrid, BarChart3, Folder, FileVideo, Database, Search as SearchIcon, X, TrendingUp, Loader2 } from 'lucide-react';
 import LoginModal from './LoginModal';
 import SignUpModal from './SignUpModal';
 import ApiConfigModal from './ApiConfigModal';
+import { useAuth } from '@/lib/AuthProvider';
+import { supabase } from '@/lib/supabase';
 
 const NAV_ITEMS = [
     { label: '대시보드', href: '/dashboard', icon: LayoutGrid },
@@ -26,10 +28,10 @@ const MOCK_NOTIFICATIONS = [
 
 export default function Header() {
     const pathname = usePathname();
+    const { isLoggedIn, user, isLoading: isAuthLoading } = useAuth();
     const [isLoginOpen, setIsLoginOpen] = useState(false);
     const [isSignUpOpen, setIsSignUpOpen] = useState(false);
     const [isApiConfigOpen, setIsApiConfigOpen] = useState(false);
-    const [isLoggedIn, setIsLoggedIn] = useState(false);
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
     const [notifications, setNotifications] = useState(MOCK_NOTIFICATIONS);
@@ -42,11 +44,10 @@ export default function Header() {
 
     const handleLoginSuccess = () => {
         setIsLoginOpen(false);
-        setIsLoggedIn(true);
     };
 
-    const handleLogout = () => {
-        setIsLoggedIn(false);
+    const handleLogout = async () => {
+        await supabase.auth.signOut();
         setIsMenuOpen(false);
     };
 
@@ -209,9 +210,11 @@ export default function Header() {
                                     className={`p-1 rounded-full border transition-all block ${isLoggedIn ? 'border-indigo-500/50 ring-2 ring-indigo-500/10' : 'border-gray-200 dark:border-zinc-800 hover:ring-2 hover:ring-gray-100'}`}
                                 >
                                     <div className="h-8 w-8 overflow-hidden rounded-full bg-gray-100 dark:bg-zinc-800 flex items-center justify-center">
-                                        {isLoggedIn ? (
-                                            <div className="h-full w-full bg-indigo-600 flex items-center justify-center text-white text-xs font-bold">
-                                                AD
+                                        {isAuthLoading ? (
+                                            <Loader2 className="h-4 w-4 animate-spin text-indigo-600" />
+                                        ) : isLoggedIn ? (
+                                            <div className="h-full w-full bg-indigo-600 flex items-center justify-center text-white text-xs font-bold uppercase">
+                                                {user?.email?.[0] || 'U'}
                                             </div>
                                         ) : (
                                             <User className="h-5 w-5 text-gray-400" />
@@ -224,12 +227,16 @@ export default function Header() {
                                     <div className="absolute right-0 mt-3 w-56 origin-top-right divide-y divide-gray-100 rounded-2xl bg-white shadow-2xl ring-1 ring-black ring-opacity-5 focus:outline-none dark:bg-zinc-900 dark:divide-zinc-800 dark:ring-zinc-800 animate-in fade-in zoom-in duration-200 z-[60] before:absolute before:-top-3 before:left-0 before:right-0 before:h-3 before:content-['']">
                                         <div className="px-4 py-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="h-10 w-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold ring-2 ring-indigo-100 dark:ring-indigo-900/30">
-                                                    AD
+                                                <div className="h-10 w-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold ring-2 ring-indigo-100 dark:ring-indigo-900/30 uppercase">
+                                                    {user?.email?.[0] || 'U'}
                                                 </div>
                                                 <div className="flex flex-col">
-                                                    <span className="text-sm font-bold text-gray-900 dark:text-white">Admin User</span>
-                                                    <span className="text-xs text-gray-500 dark:text-gray-400">admin@tubiq.com</span>
+                                                    <span className="text-sm font-bold text-gray-900 dark:text-white truncate max-w-[120px]">
+                                                        {user?.email?.split('@')[0]}
+                                                    </span>
+                                                    <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[120px]">
+                                                        {user?.email}
+                                                    </span>
                                                 </div>
                                             </div>
                                         </div>

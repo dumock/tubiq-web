@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Folder } from '@/types';
+import { useAuth } from '@/lib/AuthProvider';
 
 interface DbFolder {
     id: string;
@@ -25,25 +26,24 @@ function mapDbToFolder(dbFolder: DbFolder): Folder {
 }
 
 export function useFolders(scope: 'channels' | 'videos' | 'analysis' = 'channels') {
+    const { session } = useAuth();
     const [folders, setFolders] = useState<Folder[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
     // Fetch folders from API with scope filter
     const fetchFolders = useCallback(async () => {
+        const token = session?.access_token;
+        if (!token) {
+            setFolders([]);
+            setIsLoading(false);
+            return;
+        }
+
         setIsLoading(true);
         setError(null);
 
         try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const token = session?.access_token;
-
-            if (!token) {
-                setFolders([]);
-                setIsLoading(false);
-                return;
-            }
-
             const res = await fetch(`/api/folders?scope=${scope}`, {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
@@ -60,14 +60,12 @@ export function useFolders(scope: 'channels' | 'videos' | 'analysis' = 'channels
         } finally {
             setIsLoading(false);
         }
-    }, [scope]);
+    }, [scope, session]);
 
     // Create folder with scope
     const createFolder = useCallback(async (name: string, parentId: string | null = null): Promise<boolean> => {
         try {
-            const { data: { session } } = await supabase.auth.getSession();
             const token = session?.access_token;
-
             if (!token) {
                 setError('Not authenticated');
                 return false;
@@ -96,14 +94,12 @@ export function useFolders(scope: 'channels' | 'videos' | 'analysis' = 'channels
             setError('Network error');
             return false;
         }
-    }, [fetchFolders, scope]);
+    }, [fetchFolders, scope, session]);
 
     // Rename folder
     const renameFolder = useCallback(async (id: string, name: string): Promise<boolean> => {
         try {
-            const { data: { session } } = await supabase.auth.getSession();
             const token = session?.access_token;
-
             if (!token) {
                 setError('Not authenticated');
                 return false;
@@ -132,14 +128,12 @@ export function useFolders(scope: 'channels' | 'videos' | 'analysis' = 'channels
             setError('Network error');
             return false;
         }
-    }, [fetchFolders]);
+    }, [fetchFolders, session]);
 
     // Delete folder
     const deleteFolder = useCallback(async (id: string): Promise<boolean> => {
         try {
-            const { data: { session } } = await supabase.auth.getSession();
             const token = session?.access_token;
-
             if (!token) {
                 setError('Not authenticated');
                 return false;
@@ -164,7 +158,7 @@ export function useFolders(scope: 'channels' | 'videos' | 'analysis' = 'channels
             setError('Network error');
             return false;
         }
-    }, [fetchFolders]);
+    }, [fetchFolders, session]);
 
     // Initial fetch
     useEffect(() => {
