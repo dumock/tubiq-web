@@ -164,6 +164,14 @@ def parse_youtube_ids(url: str) -> Dict[str, Optional[str]]:
 
     return out
 
+def is_valid_uuid(val: Any) -> bool:
+    if not val: return False
+    try:
+        uuid.UUID(str(val))
+        return True
+    except Exception:
+        return False
+
 def best_external_id(kind: str, platform: str, url: str, hinted_channel: Optional[str], hinted_video: Optional[str]) -> Optional[str]:
     if kind == "video":
         if hinted_video:
