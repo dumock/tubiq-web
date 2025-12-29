@@ -316,6 +316,15 @@ async function processOnce() {
     return;
   }
 
+  // 3.5) Gather unique channel ids and fetch channel metadata
+  const channelIds = [...new Set(Array.from(videoById.values()).map(v => v.youtube_channel_id).filter(Boolean))];
+  let channelById = new Map();
+  try {
+    channelById = await fetchYoutubeChannels(channelIds);
+  } catch (e) {
+    console.warn("[relay-metadata-worker] channel fetch failed (optional):", e);
+  }
+
   // 4) metadata 수집 및 DB 연동
   const processedIds = [];
   const payload = [];
