@@ -6,10 +6,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Install Node.js (Required for JS token generation in TubiQ crawler)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nodejs \
+    npm \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py ./
+# Copy logic
+COPY crawlers/ ./crawlers/
+COPY config.yaml .
+COPY main.py .
 
 EXPOSE 8000
 
