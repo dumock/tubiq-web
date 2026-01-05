@@ -15,5 +15,8 @@ aiohttp==3.9.3
 aiofiles==23.2.1
 gmssl==3.2.1
 loguru==0.7.2
+browser-cookie3==0.19.1
+pydantic==2.6.4
+importlib-resources==6.4.0
 
 
