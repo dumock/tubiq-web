@@ -1,13 +1,12 @@
-FROM ghcr.io/puppeteer/puppeteer:21.5.2
+FROM mcr.microsoft.com/playwright:v1.40.0-jammy
 
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
-
-WORKDIR /usr/src/app
+WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 
 COPY . .
 
-CMD [ "node", "index.js" ]
+EXPOSE 8000
+
+CMD ["npm", "start"]

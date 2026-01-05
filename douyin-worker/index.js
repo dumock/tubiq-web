@@ -1,5 +1,6 @@
+
 const express = require('express');
-const puppeteer = require('puppeteer');
+const { chromium } = require('playwright');
 const cors = require('cors');
 
 const app = express();
@@ -11,34 +12,27 @@ const PORT = process.env.PORT || 8000;
 // Helper: Scrape Logic
 async function scrapeDouyin(url) {
     console.log('[Worker] Scraping:', url);
-    console.log('[Worker] Env ExecPath:', process.env.PUPPETEER_EXECUTABLE_PATH);
     let browser = null;
     try {
-        browser = await puppeteer.launch({
-            headless: 'new',
-            // In official image, PUPPETEER_EXECUTABLE_PATH is set automatically.
-            // If we omit it, Puppeteer uses the bundled or env-defined path.
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu'
-            ]
+        browser = await chromium.launch({
+            headless: true
         });
-        const page = await browser.newPage();
-
-        // Mobile User Agent for better metadata sometimes, but Desktop is better for OG tags on Douyin PC
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        // Mobile context often gets better metadata for short video platforms
+        const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+            viewport: { width: 375, height: 812 }
+        });
+        const page = await context.newPage();
 
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
         // Wait a bit for dynamic rendering
-        await new Promise(r => setTimeout(r, 2000));
+        await page.waitForTimeout(2000);
 
         // Evaluate
         const data = await page.evaluate(() => {
             const getMeta = (prop) => {
-                const el = document.querySelector(`meta[property="${prop}"]`) || document.querySelector(`meta[name="${prop}"]`);
+                const el = document.querySelector(`meta[property = "${prop}"]`) || document.querySelector(`meta[name = "${prop}"]`);
                 return el ? el.content : '';
             };
             const getText = (sel) => {
@@ -82,7 +76,7 @@ async function scrapeDouyin(url) {
 }
 
 app.get('/', (req, res) => {
-    res.send({ status: 'ok', service: 'douyin-worker' });
+    res.send({ status: 'ok', service: 'douyin-worker-playwright' });
 });
 
 app.get('/api/info', async (req, res) => {
@@ -102,5 +96,5 @@ app.post('/api/video', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`Douyin Worker running on port ${PORT}`);
+    console.log(`Douyin Worker running on port ${PORT} `);
 });
