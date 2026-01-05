@@ -273,6 +273,52 @@ async def hybrid_video_data(
         return {"code": 500, "error": result.get("error", "Unknown error")}
 
 
+@app.get("/api/debug")
+async def debug_url(url: str = Query(..., description="Douyin video URL")):
+    """Debug endpoint to see raw data from Douyin page"""
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
+            response = await client.get(url, headers=HEADERS)
+            html = response.text
+            final_url = str(response.url)
+            
+            # Check for RENDER_DATA
+            render_match = re.search(
+                r'<script id="RENDER_DATA" type="application/json">([^<]+)</script>',
+                html
+            )
+            
+            render_data_preview = None
+            if render_match:
+                encoded = render_match.group(1)[:500]  # First 500 chars
+                try:
+                    decoded = urllib.parse.unquote(encoded)
+                    render_data_preview = decoded
+                except:
+                    render_data_preview = encoded
+            
+            # Check for SSR data
+            ssr_match = re.search(r'window\.__SSR_DATA__\s*=\s*(\{.*?\});', html, re.S)
+            ssr_preview = ssr_match.group(1)[:300] if ssr_match else None
+            
+            # OG tags
+            og_title = re.search(r'og:title["\'][^>]+content=["\']([^"\']+)', html)
+            og_image = re.search(r'og:image["\'][^>]+content=["\']([^"\']+)', html)
+            
+            return {
+                "final_url": final_url,
+                "html_length": len(html),
+                "has_render_data": render_match is not None,
+                "render_data_preview": render_data_preview,
+                "has_ssr_data": ssr_match is not None,
+                "ssr_preview": ssr_preview,
+                "og_title": og_title.group(1) if og_title else None,
+                "og_image": og_image.group(1) if og_image else None,
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
