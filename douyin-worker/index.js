@@ -11,11 +11,13 @@ const PORT = process.env.PORT || 8000;
 // Helper: Scrape Logic
 async function scrapeDouyin(url) {
     console.log('[Worker] Scraping:', url);
+    console.log('[Worker] Env ExecPath:', process.env.PUPPETEER_EXECUTABLE_PATH);
     let browser = null;
     try {
         browser = await puppeteer.launch({
             headless: 'new',
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+            // In official image, PUPPETEER_EXECUTABLE_PATH is set automatically.
+            // If we omit it, Puppeteer uses the bundled or env-defined path.
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
