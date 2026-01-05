@@ -13,4 +13,7 @@ qrcode==7.4.2
 pillow==10.2.0
 aiohttp==3.9.3
 aiofiles==23.2.1
+gmssl==3.2.1
+loguru==0.7.2
+
 
