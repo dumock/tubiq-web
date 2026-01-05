@@ -21,6 +21,9 @@ COPY crawlers/ ./crawlers/
 COPY config.yaml .
 COPY main.py .
 
+# Create logs directory and ensure permissions (Fixes PermissionError)
+RUN mkdir -p logs && chmod 777 logs
+
 EXPOSE 8000
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
