@@ -9,6 +9,11 @@ app.use(cors());
 
 const PORT = process.env.PORT || 8000;
 
+const fs = require('fs');
+
+// Force usage of the standard image path
+process.env.PLAYWRIGHT_BROWSERS_PATH = '/ms-playwright';
+
 // Helper: Scrape Logic
 async function scrapeDouyin(url) {
     console.log('[Worker] Scraping:', url);
@@ -69,12 +74,40 @@ async function scrapeDouyin(url) {
 
     } catch (e) {
         console.error('[Worker] Error:', e);
-        // Debug: Return Env vars to diagnose path issues
+
+        // Debug: List files to find browser
+        const debugDirs = ['/ms-playwright', '/root/.cache/ms-playwright', '/app', '/usr/bin'];
+        const fsDebug = {};
+
+        debugDirs.forEach(dir => {
+            try {
+                if (fs.existsSync(dir)) {
+                    fsDebug[dir] = fs.readdirSync(dir);
+                    // If /ms-playwright exists, dig one level deeper to see chromium version
+                    if (dir === '/ms-playwright') {
+                        fsDebug[dir].forEach(sub => {
+                            try {
+                                const subPath = `${dir}/${sub}`;
+                                if (fs.lstatSync(subPath).isDirectory()) {
+                                    fsDebug[subPath] = fs.readdirSync(subPath);
+                                }
+                            } catch (err) { }
+                        });
+                    }
+                } else {
+                    fsDebug[dir] = 'NOT_FOUND';
+                }
+            } catch (err) {
+                fsDebug[dir] = err.message;
+            }
+        });
+
+        // Debug: Return Env vars
         const envDebug = Object.keys(process.env)
             .filter(k => k.includes('PATH') || k.includes('CHROME') || k.includes('PUPPETEER') || k.includes('PLAYWRIGHT'))
             .reduce((obj, k) => { obj[k] = process.env[k]; return obj; }, {});
 
-        return { success: false, error: e.message, env: envDebug };
+        return { success: false, error: e.message, env: envDebug, fs: fsDebug };
     } finally {
         if (browser) await browser.close();
     }
