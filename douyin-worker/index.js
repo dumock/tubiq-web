@@ -20,7 +20,8 @@ async function scrapeDouyin(url) {
     let browser = null;
     try {
         browser = await chromium.launch({
-            headless: true
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
         // Mobile context often gets better metadata for short video platforms
         const context = await browser.newContext({
