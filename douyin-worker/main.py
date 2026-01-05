@@ -1,4 +1,4 @@
-# main.py - Bridge to TubiQ Crawler
+# Bridge to TubiQ Crawler
 import sys
 import os
 import asyncio
@@ -8,11 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 # Ensure we can import from the local directory
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+import_error = None
 try:
     from crawlers.hybrid.hybrid_crawler import HybridCrawler
-except ImportError as e:
+except Exception as e:
+    import traceback
+    import_error = f"{str(e)}\n{traceback.format_exc()}"
     print(f"Error importing HybridCrawler: {e}")
-    # Fallback/Debug mode if import fails due to missing dependencies
     HybridCrawler = None
 
 app = FastAPI(title="Douyin Worker (TubiQ Engine)", version="3.0.0")
@@ -31,7 +33,11 @@ crawler = HybridCrawler() if HybridCrawler else None
 @app.get("/")
 async def root():
     status = "ready" if crawler else "error (import failed)"
-    return {"status": status, "service": "douyin-worker-tubiq-engine"}
+    return {
+        "status": status, 
+        "service": "douyin-worker-tubiq-engine",
+        "import_error": import_error
+    }
 
 @app.get("/health")
 async def health():
