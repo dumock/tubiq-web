@@ -69,7 +69,12 @@ async function scrapeDouyin(url) {
 
     } catch (e) {
         console.error('[Worker] Error:', e);
-        return { success: false, error: e.message };
+        // Debug: Return Env vars to diagnose path issues
+        const envDebug = Object.keys(process.env)
+            .filter(k => k.includes('PATH') || k.includes('CHROME') || k.includes('PUPPETEER') || k.includes('PLAYWRIGHT'))
+            .reduce((obj, k) => { obj[k] = process.env[k]; return obj; }, {});
+
+        return { success: false, error: e.message, env: envDebug };
     } finally {
         if (browser) await browser.close();
     }
