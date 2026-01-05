@@ -54,36 +54,51 @@ async def get_info(url: str = Query(..., description="Douyin video URL")):
 
     try:
         # TubiQ crawler main entry point
-        # The main() method usually expects arguments or runs a batch
-        # We need to call the specific method for single video
-        
-        # Based on hybrid_crawler.py analysis:
-        # result = await self.hybrid_parsing_single_video(url, minimal=minimal)
-        
-        data = await crawler.hybrid_parsing_single_video(url, minimal=True)
-        
-        # Check if data extraction was successful
-        # TubiQ returns a dict, we need to adapt it
-        
+        # Try video parsing first
+        try:
+            data = await crawler.hybrid_parsing_single_video(url, minimal=True)
+        except Exception:
+            data = None
+
+        # If video parsing failed, try profile parsing
         if not data:
-            return {"success": False, "error": "No data returned"}
-            
-        # Map to expected schema
-        # TubiQ data structure (based on models.py/web_crawler.py):
-        # {
-        #   'platform': 'douyin',
-        #   'aweme_id': ...,
-        #   'desc': ...,
-        #   'cover': ...,
-        #   'author': { 'nickname': ..., 'unique_id': ... },
-        #   'statistics': { 'play_count': ..., 'digg_count': ... }
-        # }
+            print(f"[Worker] Video parsing failed for {url}, trying profile parsing...")
+            try:
+                # 1. Get sec_user_id (handles redirects)
+                sec_user_id = await crawler.DouyinWebCrawler.get_sec_user_id(url)
+                if sec_user_id:
+                     # 2. Fetch profile
+                    profile_res = await crawler.DouyinWebCrawler.handler_user_profile(sec_user_id)
+                    if profile_res and 'user' in profile_res:
+                        user = profile_res['user']
+                        # Map profile to expected format
+                        # return success with author info
+                        return {
+                            "success": True,
+                            "title": user.get('nickname', 'Douyin User'),
+                            "thumbnail_url": user.get('avatar_larger', {}).get('url_list', [None])[0] or user.get('avatar_thumb', {}).get('url_list', [None])[0],
+                            "author": user.get('nickname', ''),
+                            "author_id": user.get('unique_id') or user.get('short_id') or str(sec_user_id),
+                            "view_count": 0,
+                            "is_profile": True,
+                            "original_data": profile_res
+                        }
+            except Exception as e:
+                print(f"[Worker] Profile parsing failed: {e}")
+                pass
         
+        # Check if data extraction was successful (video)
+        if not data:
+            return {"success": False, "error": "No data returned (Video or Profile)"}
+            
+        # Map to expected schema (Video)
         title = data.get("desc", "") or data.get("title", "")
+        # ... (rest of video mapping)
         thumbnail = data.get("cover", "") or data.get("origin_cover", "")
         
         author_data = data.get("author", {})
         author_name = author_data.get("nickname", "") if isinstance(author_data, dict) else str(author_data)
+        author_id = author_data.get("unique_id", "") if isinstance(author_data, dict) else ""
         
         stats = data.get("statistics", {})
         view_count = stats.get("play_count", 0) if isinstance(stats, dict) else 0
@@ -93,8 +108,9 @@ async def get_info(url: str = Query(..., description="Douyin video URL")):
             "title": title,
             "thumbnail_url": thumbnail,
             "author": author_name,
+            "author_id": author_id,
             "view_count": view_count,
-            "original_data": data  # Return full data for debugging
+            "original_data": data
         }
 
     except Exception as e:

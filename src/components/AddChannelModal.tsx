@@ -20,7 +20,10 @@ interface AddChannelModalProps {
     onSave: (channel: ChannelData) => void;
 }
 
+import { useYouTubeApi } from '@/hooks/useYouTubeApi';
+
 export default function AddChannelModal({ isOpen, onClose, onSave }: AddChannelModalProps) {
+    const { fetchYouTube } = useYouTubeApi();
     const [input, setInput] = useState('');
     const [error, setError] = useState('');
     const [isLoading, setIsLoading] = useState(false);
@@ -57,8 +60,15 @@ export default function AddChannelModal({ isOpen, onClose, onSave }: AddChannelM
 
         setIsLoading(true);
 
+        // Extract URL if input contains mixed text (e.g. Douyin share text)
+        let queryInput = input;
+        const urlMatch = input.match(/(https?:\/\/[^\s]+)/);
+        if (urlMatch) {
+            queryInput = urlMatch[0];
+        }
+
         try {
-            const res = await fetch(`/api/youtube/resolve-channel?input=${encodeURIComponent(input)}`)
+            const res = await fetchYouTube(`/api/youtube/resolve-channel?input=${encodeURIComponent(queryInput)}`)
             const data = await res.json();
 
             if (!res.ok || !data.ok) {
