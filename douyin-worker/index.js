@@ -11,9 +11,6 @@ const PORT = process.env.PORT || 8000;
 
 const fs = require('fs');
 
-// Force usage of the standard image path
-process.env.PLAYWRIGHT_BROWSERS_PATH = '/ms-playwright';
-
 // Helper: Scrape Logic
 async function scrapeDouyin(url) {
     console.log('[Worker] Scraping:', url);
