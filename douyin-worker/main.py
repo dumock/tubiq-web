@@ -37,12 +37,14 @@ async def extract_aweme_id(url: str) -> str:
             url = str(response.url)
     
     # Extract aweme_id from full URL
-    # Patterns: /video/123456, /note/123456, modal_id=123456
+    # Patterns for different URL formats
     patterns = [
         r'/video/(\d+)',
         r'/note/(\d+)',
+        r'/share/video/(\d+)',  # iesdouyin.com format
         r'modal_id=(\d+)',
         r'/(\d{19})',  # 19-digit ID in path
+        r'/(\d{10,})',  # Any 10+ digit ID in path (fallback)
     ]
     
     for pattern in patterns:
