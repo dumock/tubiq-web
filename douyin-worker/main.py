@@ -63,29 +63,81 @@ async def get_info(url: str = Query(..., description="Douyin video URL")):
         # If video parsing failed, try profile parsing
         if not data:
             print(f"[Worker] Video parsing failed for {url}, trying profile parsing...")
-            try:
-                # 1. Get sec_user_id (handles redirects)
-                sec_user_id = await crawler.DouyinWebCrawler.get_sec_user_id(url)
-                if sec_user_id:
-                     # 2. Fetch profile
-                    profile_res = await crawler.DouyinWebCrawler.handler_user_profile(sec_user_id)
-                    if profile_res and 'user' in profile_res:
-                        user = profile_res['user']
-                        # Map profile to expected format
-                        # return success with author info
+            
+            # 1. Douyin Profile Fallback
+            if "douyin" in url:
+                try:
+                    sec_user_id = await crawler.DouyinWebCrawler.get_sec_user_id(url)
+                    if sec_user_id:
+                        profile_res = await crawler.DouyinWebCrawler.handler_user_profile(sec_user_id)
+                        if profile_res and 'user' in profile_res:
+                            user = profile_res['user']
+                            return {
+                                "success": True,
+                                "title": user.get('nickname', ''),
+                                "thumbnail_url": user.get('avatar_larger', {}).get('url_list', [None])[0] or user.get('avatar_thumb', {}).get('url_list', [None])[0],
+                                "author": user.get('nickname', ''),
+                                "author_id": user.get('unique_id') or user.get('short_id') or str(sec_user_id),
+                                "view_count": user.get('total_favorited', 0),
+                                "follower_count": user.get('follower_count', 0),
+                                "is_profile": True,
+                                "original_data": profile_res
+                            }
+                except Exception as e:
+                    print(f"[Worker] Douyin Profile parsing failed: {e}")
+                    pass
+
+            # 2. TikTok Profile Fallback
+            elif "tiktok" in url:
+                try:
+                    import re
+                    # Extract handle from https://www.tiktok.com/@handle
+                    match = re.search(r"tiktok\.com/(@[\w\._]+)", url)
+                    unique_id = match.group(1).lstrip('@') if match else None
+                    
+                    if unique_id:
+                        print(f"[Worker] Fetching TikTok profile for handle: {unique_id}")
+                        
+                        # Try the internal crawler first
+                        profile_res = None
+                        try:
+                            profile_res = await crawler.TikTokWebCrawler.fetch_user_profile(None, unique_id)
+                        except Exception as e:
+                            print(f"[Worker] TikTok internal crawler failed: {e}")
+                        
+                        user_info = profile_res.get("userInfo", {}) if profile_res else {}
+                        user = user_info.get("user", {})
+                        stats = user_info.get("stats", {})
+                        
+                        # If internal crawler fails, return minimal data based on handle
+                        if not user:
+                            print(f"[Worker] Returning minimal TikTok data for {unique_id}")
+                            return {
+                                "success": True,
+                                "title": f"@{unique_id}",
+                                "thumbnail_url": "",  # No avatar available
+                                "author": f"@{unique_id}",
+                                "author_id": unique_id,
+                                "view_count": 0,
+                                "follower_count": 0,
+                                "is_profile": True,
+                                "original_data": {"note": "minimal_data_fallback"}
+                            }
+                        
                         return {
                             "success": True,
-                            "title": user.get('nickname', 'Douyin User'),
-                            "thumbnail_url": user.get('avatar_larger', {}).get('url_list', [None])[0] or user.get('avatar_thumb', {}).get('url_list', [None])[0],
+                            "title": user.get('nickname', ''),
+                            "thumbnail_url": user.get('avatarLarger', '') or user.get('avatarThumb', ''),
                             "author": user.get('nickname', ''),
-                            "author_id": user.get('unique_id') or user.get('short_id') or str(sec_user_id),
-                            "view_count": 0,
+                            "author_id": user.get('uniqueId', ''),
+                            "view_count": stats.get('heartCount', 0) or stats.get('videoCount', 0),
+                            "follower_count": stats.get('followerCount', 0),
                             "is_profile": True,
                             "original_data": profile_res
                         }
-            except Exception as e:
-                print(f"[Worker] Profile parsing failed: {e}")
-                pass
+                except Exception as e:
+                    print(f"[Worker] TikTok Profile parsing failed: {e}")
+                    pass
         
         # Check if data extraction was successful (video)
         if not data:

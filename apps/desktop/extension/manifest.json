@@ -1,0 +1,52 @@
+{
+    "manifest_version": 3,
+    "name": "TubiQ YouTube Downloader",
+    "version": "1.4",
+    "description": "YouTube download overlay for TubiQ Desktop",
+    "permissions": [
+        "activeTab",
+        "scripting",
+        "storage"
+    ],
+    "host_permissions": [
+        "*://*.youtube.com/*",
+        "http://localhost:3000/*"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "images/tubiq-logo-icon.png"
+            ],
+            "matches": [
+                "*://*.youtube.com/*"
+            ]
+        }
+    ],
+    "content_scripts": [
+        {
+            "matches": [
+                "*://*.youtube.com/*"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "css": [
+                "styles.css"
+            ],
+            "run_at": "document_end",
+            "all_frames": false
+        },
+        {
+            "matches": [
+                "http://localhost:3000/*"
+            ],
+            "js": [
+                "auth-bridge.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ]
+}

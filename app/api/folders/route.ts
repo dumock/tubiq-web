@@ -4,10 +4,12 @@ import { getSupabaseServer, getAuthenticatedUser } from '@/lib/supabase-server';
 // GET: Fetch folders for authenticated user
 export async function GET(request: Request) {
     try {
-        const supabase = getSupabaseServer(true); // Service role to bypass RLS issues in server environment if any, but filter manually
-        const user = await getAuthenticatedUser(request, supabase);
+        const authHeader = request.headers.get('Authorization');
+        const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+        const supabase = getSupabaseServer(false, token);
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
 
-        if (!user) {
+        if (authError || !user) {
             return NextResponse.json({ ok: false, message: 'Unauthorized' }, { status: 401 });
         }
 
@@ -37,10 +39,12 @@ export async function GET(request: Request) {
 // POST: Create a new folder
 export async function POST(request: Request) {
     try {
-        const supabase = getSupabaseServer(true);
-        const user = await getAuthenticatedUser(request, supabase);
+        const authHeader = request.headers.get('Authorization');
+        const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+        const supabase = getSupabaseServer(false, token);
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
 
-        if (!user) {
+        if (authError || !user) {
             return NextResponse.json({ ok: false, message: 'Unauthorized' }, { status: 401 });
         }
 
@@ -98,10 +102,12 @@ export async function POST(request: Request) {
 // PATCH: Rename a folder
 export async function PATCH(request: Request) {
     try {
-        const supabase = getSupabaseServer(true);
-        const user = await getAuthenticatedUser(request, supabase);
+        const authHeader = request.headers.get('Authorization');
+        const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+        const supabase = getSupabaseServer(false, token);
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
 
-        if (!user) {
+        if (authError || !user) {
             return NextResponse.json({ ok: false, message: 'Unauthorized' }, { status: 401 });
         }
 
@@ -135,10 +141,12 @@ export async function PATCH(request: Request) {
 // DELETE: Delete a folder
 export async function DELETE(request: Request) {
     try {
-        const supabase = getSupabaseServer(true);
-        const user = await getAuthenticatedUser(request, supabase);
+        const authHeader = request.headers.get('Authorization');
+        const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+        const supabase = getSupabaseServer(false, token);
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
 
-        if (!user) {
+        if (authError || !user) {
             return NextResponse.json({ ok: false, message: 'Unauthorized' }, { status: 401 });
         }
 

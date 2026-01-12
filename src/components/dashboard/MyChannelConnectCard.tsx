@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useState } from 'react';
-import { Youtube, Link2, Link2Off, Settings, AlertCircle, Loader2 } from 'lucide-react';
+import { Link2, Link2Off, Settings, AlertCircle, Loader2 } from 'lucide-react';
 import { useMyChannelStore } from '@/lib/myChannelStore';
 import { MyChannelList } from '@/components/dashboard/MyChannelList';
 import { MyChannelDailyChart } from './MyChannelDailyChart';
+import { YouTubeLogo } from '@/components/icons/YouTubeLogo';
 
 export function MyChannelConnectCard() {
     const { isConnected, channels, setConnected, setChannels, disconnect } = useMyChannelStore();
@@ -43,7 +44,7 @@ export function MyChannelConnectCard() {
         <div className="rounded-xl border border-gray-100 bg-white p-5 shadow-sm dark:bg-zinc-900 dark:border-zinc-800">
             <div className="flex items-center justify-between mb-4">
                 <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2 dark:text-white">
-                    <Youtube className="w-4 h-4 text-rose-600" />
+                    <YouTubeLogo width={16} height={16} />
                     내 채널 연결
                 </h3>
                 {isConnected && (

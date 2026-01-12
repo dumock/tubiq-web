@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
+import { getGeminiApiKey } from '@/lib/api-keys-server';
 
 export async function POST(request: Request) {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = await getGeminiApiKey(request);
     if (!apiKey) {
         return NextResponse.json({ ok: false, message: 'Missing GEMINI_API_KEY' }, { status: 500 });
     }

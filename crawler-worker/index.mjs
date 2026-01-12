@@ -15,12 +15,14 @@ const YT_KEYS = [
   process.env.YOUTUBE_API_KEY_4,
 ].filter(Boolean);
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-}
+if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL environment variable");
+if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY environment variable");
 if (YT_KEYS.length === 0) {
-  throw new Error("Missing YOUTUBE_API_KEY_1 (and optional _2/_3/_4)");
+  throw new Error("Missing YouTube API Keys (YOUTUBE_API_KEY_1 ~ 4). At least one is required.");
 }
+
+console.log(`[crawler][init] Supabase URL: ${SUPABASE_URL.substring(0, 15)}...`);
+console.log(`[crawler][init] YouTube Keys detected: ${YT_KEYS.length}`);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
@@ -108,14 +110,57 @@ async function updateChannelRow(payload) {
   if (error) throw error;
 }
 
+/**
+ * ✅ [NEW] Discovery Phase
+ * YouTube Trending 기반으로 새로운 채널 ID를 발굴하여 DB에 추가
+ */
+async function discoverChannels(regionCode, key) {
+  console.log(`[crawler][discovery] searching popular videos in region: ${regionCode}`);
+  const url = new URL("https://www.googleapis.com/youtube/v3/videos");
+  url.searchParams.set("part", "snippet");
+  url.searchParams.set("chart", "mostPopular");
+  url.searchParams.set("regionCode", regionCode);
+  url.searchParams.set("maxResults", "50");
+  url.searchParams.set("key", key);
+
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`YouTube API Discovery error ${res.status}: ${text}`);
+  }
+
+  const json = await res.json();
+  const items = json.items ?? [];
+  const channelsToInsert = items.map(item => ({
+    youtube_channel_id: item.snippet.channelId,
+    title: item.snippet.channelTitle,
+    scope: 'channels',
+    status: 'active',
+    is_domestic: regionCode === 'KR' // KR 지역에서 발견되면 국내 채널로 우선 분류
+  }));
+
+  // 중복 제외하고 Insert (upsert)
+  // youtube_channel_id가 고유 키여야 함
+  if (channelsToInsert.length > 0) {
+    const { error } = await supabase
+      .from("channels")
+      .upsert(channelsToInsert, { onConflict: 'youtube_channel_id', ignoreDuplicates: true });
+
+    if (error) console.error(`[crawler][discovery] upsert error:`, error.message);
+    else console.log(`[crawler][discovery] discovered and upserted ${channelsToInsert.length} channels from ${regionCode}`);
+  }
+}
+
 export async function startCrawler() {
   console.log(`[crawler] start. env=${NODE_ENV}, yt_keys=${YT_KEYS.length}`);
 
   let keyIdx = 0;
   let loops = 0;
   let lastWorkAt = Date.now();
+  const regions = ['KR', 'US', 'JP', 'VN', 'TH', 'ID', 'BR', 'MX'];
+  let regionIdx = 0;
 
-  // ✅ “살아있음” 로그(너가 ‘아무 로그가 안 찍혀서 불안’했던 문제 해결)
+  // ✅ “살아있음” 로그
   setInterval(() => {
     const secs = Math.floor((Date.now() - lastWorkAt) / 1000);
     console.log(`[crawler][hb] alive. loops=${loops}, lastWork=${secs}s ago`);
@@ -124,26 +169,27 @@ export async function startCrawler() {
   while (true) {
     loops += 1;
 
-    let targets;
     try {
-      targets = await fetchTargets(50);
-    } catch (e) {
-      console.error("[crawler] fetchTargets error:", String(e?.message ?? e));
-      await sleep(15_000);
-      continue;
-    }
+      const currentKey = pickKey(keyIdx++);
 
-    if (targets.length === 0) {
-      console.log("[crawler] no targets. sleep 60s");
-      await sleep(60_000);
-      continue;
-    }
+      // 1. Discovery Phase (매 5루프마다 한 번씩 새로운 채널 탐색)
+      if (loops % 5 === 1) {
+        const region = regions[regionIdx % regions.length];
+        await discoverChannels(region, currentKey);
+        regionIdx++;
+      }
 
-    const ids = targets.map((t) => t.youtube_channel_id);
+      // 2. Metadata Update Phase
+      let targets = await fetchTargets(50);
 
-    try {
-      const key = pickKey(keyIdx++);
-      const json = await ytChannelsList(ids, key);
+      if (targets.length === 0) {
+        console.log("[crawler] no metadata targets. sleep 60s");
+        await sleep(60_000);
+        continue;
+      }
+
+      const ids = targets.map((t) => t.youtube_channel_id);
+      const json = await ytChannelsList(ids, currentKey);
       const items = json.items ?? [];
 
       const byId = new Map(items.map((it) => [it.id, it]));
@@ -161,16 +207,15 @@ export async function startCrawler() {
       lastWorkAt = Date.now();
       console.log(`[crawler] updated ${updated}/${ids.length} channels (api_items=${items.length})`);
 
-      // 너무 빠르게 돌면 API/DB 부담
-      await sleep(1000);
+      // 과부하 방지
+      await sleep(2000);
     } catch (e) {
       const msg = String(e?.message ?? e);
       console.error("[crawler] error:", msg);
 
-      // quota/403이면 키 바꿔가며 버팀
       if (msg.includes("403") || msg.toLowerCase().includes("quota")) {
-        console.error("[crawler] quota/403 suspected. switching key and sleep 10s");
-        await sleep(10_000);
+        console.error("[crawler] quota/403 suspected. sleep 30s");
+        await sleep(30_000);
         continue;
       }
 

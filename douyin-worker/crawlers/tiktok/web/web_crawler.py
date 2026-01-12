@@ -211,13 +211,18 @@ class TikTokWebCrawler:
 
                 r1 = await client.get(url_www)
                 if r1.status_code == 200:
+                    print(f"[debug] www 200. len={len(r1.text)}")
+                    # print(f"[debug] head: {r1.text[:300]}")
                     state = _extract_state(r1.text)
 
                 if not state:
+                    print(f"[debug] www failed to extract state. Trying m.")
                     r2 = await client.get(url_m)
                     if r2.status_code == 200:
+                        print(f"[debug] m 200. len={len(r2.text)}")
                         state = _extract_state(r2.text)
-        except Exception:
+        except Exception as e:
+            print(f"[debug] fetch_user_profile exception: {e}")
             state = None
 
         if not state:

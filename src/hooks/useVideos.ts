@@ -16,7 +16,9 @@ interface DbVideo {
     channels: { title: string } | null;
     channel_name: string | null;
     folder_id: string | null;
-    memo: string | null; // ✅ NEW
+    memo: string | null;
+    platform?: string; // ✅ NEW
+    url?: string; // ✅ NEW: Content/Redirect URL
 }
 
 function mapDbToAsset(v: DbVideo): Asset {
@@ -24,6 +26,8 @@ function mapDbToAsset(v: DbVideo): Asset {
         id: v.id,
         type: 'video',
         title: v.title,
+        platform: v.platform || 'youtube', // ✅ NEW
+        redirectUrl: v.url, // ✅ NEW: Map DB content URL to Asset
         channelName: v.channel_name || v.channels?.title || '', // Mapped from joined table or direct column
 
         views: v.view_count,
@@ -33,12 +37,15 @@ function mapDbToAsset(v: DbVideo): Asset {
         url: v.thumbnail_url,
         folderId: v.folder_id || 'all', // Use DB folder_id
         youtubeVideoId: v.youtube_video_id,
-        memo: v.memo || undefined // ✅ NEW
+        memo: v.memo || undefined
     };
 }
 
+import { useYouTubeApi } from './useYouTubeApi';
+
 export function useVideos() {
     const { isLoggedIn, session } = useAuth();
+    const { fetchYouTube } = useYouTubeApi();
     const [videos, setVideos] = useState<Asset[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -53,7 +60,7 @@ export function useVideos() {
 
         setIsLoading(true);
         try {
-            const res = await fetch('/api/videos', {
+            const res = await fetchYouTube('/api/videos', {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             const json = await res.json();
@@ -67,7 +74,7 @@ export function useVideos() {
         } finally {
             setIsLoading(false);
         }
-    }, [session]);
+    }, [session, fetchYouTube]);
 
     const saveVideos = useCallback(async (newVideos: Asset[]): Promise<boolean> => {
         try {
@@ -82,15 +89,17 @@ export function useVideos() {
                 channel_id: v.youtubeChannelId, // Required by DB
                 channel_name: v.channelName, // Added for redundancy
                 title: v.title,
-                thumbnail_url: v.url,
+                thumbnail_url: v.url, // Asset.url is used as thumbnail in frontend
                 view_count: v.views || 0,
                 published_at: v.createdAt,
-                collected_at: new Date().toISOString() // Ensure sorting works
+                collected_at: new Date().toISOString(), // Ensure sorting works
+                platform: v.platform || 'youtube', // ✅ NEW
+                url: v.redirectUrl || (v.platform !== 'youtube' ? v.url : undefined) // ✅ Include content URL from redirectUrl
             }));
 
             console.log('Saving videos:', payload);
 
-            const res = await fetch('/api/videos', {
+            const res = await fetchYouTube('/api/videos', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -197,7 +206,7 @@ export function useVideos() {
         const userId = session?.user?.id;
         if (!userId) return;
 
-        console.log('Starting real-time subscription for user:', userId);
+        console.log('[Realtime] Starting subscription for user:', userId);
         const channel = supabase
             .channel(`videos-realtime-${userId}`)
             .on(
@@ -209,14 +218,19 @@ export function useVideos() {
                     filter: `user_id=eq.${userId}`
                 },
                 (payload) => {
-                    console.log('Real-time video insert detected:', payload);
+                    console.log('[Realtime] ✅ Video insert detected:', payload);
                     fetchVideos(); // Re-fetch to get joined channel data and full metadata
                 }
             )
-            .subscribe();
+            .subscribe((status) => {
+                console.log('[Realtime] Subscription status:', status);
+                if (status === 'CHANNEL_ERROR') {
+                    console.error('[Realtime] Channel error - check if Realtime is enabled for videos table in Supabase dashboard');
+                }
+            });
 
         return () => {
-            console.log('Cleaning up real-time subscription');
+            console.log('[Realtime] Cleaning up subscription');
             supabase.removeChannel(channel);
         };
     }, [session?.user?.id, fetchVideos]);

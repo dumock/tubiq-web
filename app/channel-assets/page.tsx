@@ -12,6 +12,7 @@ import ConfirmModal from '@/components/ConfirmModal';
 import FolderSidebar from '@/components/FolderSidebar';
 import { useFolders } from '@/hooks/useFolders';
 import { useVideos } from '@/hooks/useVideos';
+import { useYouTubeApi } from '@/hooks/useYouTubeApi';
 import VideoFolderSelectionModal from '@/components/VideoFolderSelectionModal';
 import GenericFolderSelectionModal from '@/components/GenericFolderSelectionModal';
 import { Asset } from '@/types';
@@ -72,6 +73,7 @@ export default function ChannelAssetsPage() {
     });
 
     // Data State - Folders from useFolders hook
+    const { fetchYouTube } = useYouTubeApi();
     const { folders, createFolder, renameFolder, deleteFolder, fetchFolders } = useFolders(
         contentType === 'channel' ? 'channels' : 'videos'
     );
@@ -111,14 +113,19 @@ export default function ChannelAssetsPage() {
         setIsLoading(true);
         try {
             const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-            if (sessionError) console.error('Session get error:', sessionError);
+            if (sessionError) {
+                console.error('Session get error:', sessionError);
+                return;
+            }
 
-            const token = session?.access_token;
+            if (!session) {
+                console.warn('No active session. Skipping channel fetch.');
+                setIsLoading(false);
+                return;
+            }
 
             // No scope param needed anymore, API defaults to user's assets via user_channels
-            const res = await fetch('/api/channel-assets', {
-                headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-            });
+            const res = await fetchYouTube('/api/channel-assets');
             const json = await res.json();
 
             if (json.ok && Array.isArray(json.data)) {
@@ -126,20 +133,31 @@ export default function ChannelAssetsPage() {
                     const c = row.channels; // Joined data
                     if (!c) return null;
 
+                    let url = '';
+                    const platform = c.platform || 'youtube';
+                    const cid = c.youtube_channel_id;
+
+                    if (platform === 'youtube') url = `https://youtube.com/channel/${cid}`;
+                    else if (platform === 'tiktok') url = `https://www.tiktok.com/@${cid}`; // cid is unique_id
+                    else if (platform === 'instagram') url = `https://www.instagram.com/${cid.replace('@', '')}`; // cid is username
+                    else if (platform === 'xiaohongshu') url = `https://www.xiaohongshu.com/user/profile/${cid}`; // cid is user_id
+                    else if (platform === 'douyin') url = `https://www.douyin.com/user/${cid}`; // cid is sec_user_id (maybe long)
+
                     return {
                         id: row.id, // user_channels.id
                         type: 'channel' as const,
+                        platform: platform, // ✅ NEW
                         title: c.title || 'Untitled Channel',
                         channelName: c.title || 'Untitled Channel',
                         subscribers: c.subscriber_count || 0,
-                        views: 0, // Removed non-existent view_count reference
-                        createdAt: c.published_at ? new Date(c.published_at).toISOString().split('T')[0] : '',
+                        views: 0,
+                        createdAt: c.channel_created_at ? new Date(c.channel_created_at).toISOString().split('T')[0] : '',
                         size: '-',
                         updatedAt: row.created_at ? new Date(row.created_at).toISOString().split('T')[0] : '',
                         url: 'bg-indigo-100',
                         folderId: row.folder_id || 'all',
                         avatarUrl: c.thumbnail_url || '',
-                        channelUrl: c.youtube_channel_id ? `https://youtube.com/channel/${c.youtube_channel_id}` : '',
+                        channelUrl: url,
                         youtubeChannelId: c.youtube_channel_id || ''
                     };
                 }).filter(Boolean) as Asset[];
@@ -164,6 +182,13 @@ export default function ChannelAssetsPage() {
     // Initial Data Load (API) and Real-time Subscription
     useEffect(() => {
         fetchChannels();
+
+        // Listen for Auth Changes to re-fetch if session restores/login happens
+        const { data: { subscription: authSubscription } } = supabase.auth.onAuthStateChange((event, session) => {
+            if (event === 'SIGNED_IN' && session) {
+                fetchChannels();
+            }
+        });
 
         // Subscribe to user_channels changes
         const userChannelsChannel = supabase
@@ -191,9 +216,24 @@ export default function ChannelAssetsPage() {
             )
             .subscribe();
 
+        // Subscribe to relay_channels DELETE (when worker finishes processing)
+        const relayChannelsChannel = supabase
+            .channel('relay-channels-realtime')
+            .on(
+                'postgres_changes',
+                { event: 'DELETE', schema: 'public', table: 'relay_channels' },
+                () => {
+                    console.log('Real-time update: relay_channels processed');
+                    fetchChannels();
+                }
+            )
+            .subscribe();
+
         return () => {
             supabase.removeChannel(userChannelsChannel);
             supabase.removeChannel(globalChannelsChannel);
+            supabase.removeChannel(relayChannelsChannel);
+            authSubscription.unsubscribe();
         };
     }, []);
 
@@ -294,7 +334,7 @@ export default function ChannelAssetsPage() {
     };
 
     // HANDLE SAVE CHANNEL (API)
-    const handleSaveChannel = async (channel: { id: string; title: string; handle: string; thumbnailUrl: string; subscriberCount?: number; viewCount?: number; videoCount?: number; publishedAt?: string | null }) => {
+    const handleSaveChannel = async (channel: { id: string; title: string; handle: string; thumbnailUrl: string; subscriberCount?: number; viewCount?: number; videoCount?: number; publishedAt?: string | null; platform?: 'youtube' | 'tiktok' | 'douyin' | 'instagram' | 'xiaohongshu' }) => {
         const currentFolderId = selectedFolderId === 'all' ? null : selectedFolderId;
 
         try {
@@ -315,14 +355,14 @@ export default function ChannelAssetsPage() {
                 thumbnail_url: channel.thumbnailUrl,
                 subscriber_count: channel.subscriberCount,
                 published_at: channel.publishedAt,
-                folder_id: currentFolderId
+                folder_id: currentFolderId,
+                platform: channel.platform || 'youtube' // Support TikTok/Douyin platforms
             };
 
-            const res = await fetch('/api/channel-assets', {
+            const res = await fetchYouTube('/api/channel-assets', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify(body)
             });
@@ -425,11 +465,10 @@ export default function ChannelAssetsPage() {
                         const token = session?.access_token;
                         if (!token) return;
 
-                        await fetch('/api/channel-assets', {
+                        await fetchYouTube('/api/channel-assets', {
                             method: 'PATCH',
                             headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${token}`
+                                'Content-Type': 'application/json'
                             },
                             body: JSON.stringify({
                                 channel_ids: idsToMove,
@@ -485,7 +524,7 @@ export default function ChannelAssetsPage() {
                 if (!channel.youtubeChannelId) return;
 
                 try {
-                    const res = await fetch(`/api/youtube/channel-videos?channelId=${channel.youtubeChannelId}&maxResults=${limit}&publishedAfter=${publishedAfter}`);
+                    const res = await fetchYouTube(`/api/youtube/channel-videos?channelId=${channel.youtubeChannelId}&maxResults=${limit}&publishedAfter=${publishedAfter}`);
                     const data = await res.json();
 
                     if (data.ok && data.videos) {
@@ -627,9 +666,8 @@ export default function ChannelAssetsPage() {
                     const token = session?.access_token;
                     if (token) {
                         for (const id of selectedAssetIds) {
-                            await fetch(`/api/channel-assets?id=${id}`, {
-                                method: 'DELETE',
-                                headers: { 'Authorization': `Bearer ${token}` }
+                            await fetchYouTube(`/api/channel-assets?id=${id}`, {
+                                method: 'DELETE'
                             });
                         }
                     }
@@ -664,9 +702,8 @@ export default function ChannelAssetsPage() {
                     const { data: { session } } = await supabase.auth.getSession();
                     const token = session?.access_token;
                     if (token) {
-                        await fetch(`/api/channel-assets?id=${id}`, {
-                            method: 'DELETE',
-                            headers: { 'Authorization': `Bearer ${token}` }
+                        await fetchYouTube(`/api/channel-assets?id=${id}`, {
+                            method: 'DELETE'
                         });
                     }
                     await fetchChannels(); // Refresh from DB

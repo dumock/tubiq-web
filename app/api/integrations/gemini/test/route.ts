@@ -1,14 +1,15 @@
 import { NextResponse } from 'next/server';
+import { getGeminiApiKey } from '@/lib/api-keys-server';
 
-export async function POST() {
-    const apiKey = process.env.GEMINI_API_KEY;
+export async function POST(request: Request) {
+    const apiKey = await getGeminiApiKey(request);
 
     if (!apiKey) {
         return NextResponse.json({ ok: false, message: "missing api key" }, { status: 400 });
     }
 
     try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -26,9 +27,8 @@ export async function POST() {
         }
 
         const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response text";
 
-        return NextResponse.json({ ok: true, message: "gemini api connected", text });
+        return NextResponse.json({ ok: true, text: 'Gemini API 연동 성공!' });
 
     } catch (error: any) {
         return NextResponse.json({ ok: false, message: error.message || "Internal Server Error" }, { status: 500 });

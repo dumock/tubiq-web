@@ -8,8 +8,10 @@ import ChannelTable, { Channel } from '@/components/ChannelTable';
 import KeywordSuggestions from '@/components/KeywordSuggestions';
 import MainSearchBar from '@/components/MainSearchBar';
 import { LayoutGrid, Video, Search, Download, Sparkles } from 'lucide-react';
+import { useYouTubeApi } from '@/hooks/useYouTubeApi';
 
 export default function SearchPage() {
+    const { fetchYouTube } = useYouTubeApi();
     const [activeTab, setActiveTab] = useState<'video' | 'channel'>('video');
     const [searchQuery, setSearchQuery] = useState('');
     const [submittedQuery, setSubmittedQuery] = useState('');
@@ -61,7 +63,7 @@ export default function SearchPage() {
                 console.log('[Search] Requesting translation for:', q, 'country:', country);
 
                 try {
-                    const transRes = await fetch('/api/gemini/translate', {
+                    const transRes = await fetchYouTube('/api/gemini/translate', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ keyword: q, country })
@@ -85,7 +87,7 @@ export default function SearchPage() {
 
             // 2. YouTube Search with final keyword
             console.log('[Search] Searching YouTube with:', finalKeyword, 'region:', country, 'type:', activeTab);
-            const searchRes = await fetch(`/api/youtube/search?q=${encodeURIComponent(finalKeyword)}&regionCode=${country}&type=${activeTab}`);
+            const searchRes = await fetchYouTube(`/api/youtube/search?q=${encodeURIComponent(finalKeyword)}&regionCode=${country}&type=${activeTab}`);
             const searchData = await searchRes.json();
 
             if (searchData.ok) {
@@ -115,7 +117,7 @@ export default function SearchPage() {
         setIsGeneratingSuggestions(true);
 
         try {
-            const res = await fetch('/api/gemini/suggest', {
+            const res = await fetchYouTube('/api/gemini/suggest', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

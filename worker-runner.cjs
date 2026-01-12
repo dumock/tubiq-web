@@ -1,3 +1,4 @@
+require('dotenv').config({ path: '.env.local' });
 const role = process.env.WORKER_ROLE;
 
 if (!role) {

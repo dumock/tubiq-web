@@ -62,27 +62,98 @@ export default function AssetCard({ asset, variant = 'default', isSelected, onDo
 
     const handleCopyLink = (e: React.MouseEvent) => {
         e.stopPropagation();
-        const videoId = getVideoId();
-        if (videoId) {
-            const url = `https://youtube.com/watch?v=${videoId}`;
+
+        let url = '';
+        if (asset.platform && asset.platform !== 'youtube') {
+            url = asset.redirectUrl || asset.url || '';
+        } else {
+            const videoId = getVideoId();
+            if (videoId) {
+                url = `https://youtube.com/watch?v=${videoId}`;
+            }
+        }
+
+        if (url) {
             navigator.clipboard.writeText(url);
             alert('링크가 복사되었습니다.');
+        } else {
+            alert('링크를 찾을 수 없습니다.');
         }
         setIsMenuOpen(false);
     };
 
-    const handleDownload = (e: React.MouseEvent) => {
+    const handleDownload = async (e: React.MouseEvent) => {
         e.stopPropagation();
-        alert('다운로드 기능은 서버 설정 후 사용 가능합니다.');
         setIsMenuOpen(false);
+
+        const videoId = getVideoId();
+        if (!videoId) {
+            alert('영상 ID를 찾을 수 없습니다.');
+            return;
+        }
+
+        // Dispatch custom event for Electron to intercept
+        const downloadEvent = new CustomEvent('tubiq-download', {
+            detail: {
+                videoId,
+                title: asset.title,
+                url: (asset.platform && asset.platform !== 'youtube') ? asset.url : undefined // Pass full URL for non-YouTube
+            }
+        });
+        window.dispatchEvent(downloadEvent);
+    };
+
+    // Platform specific rendering
+    const isSpecialPlatform = asset.platform && ['douyin', 'tiktok', 'instagram'].includes(asset.platform);
+
+    const renderThumbnail = () => {
+        // Use wsrv.nl proxy for Instagram & Xiaohongshu to bypass CORS/Referrer blocking
+        const imageUrl = ((asset.platform === 'instagram' || asset.platform === 'xiaohongshu') && asset.url)
+            ? `https://wsrv.nl/?url=${encodeURIComponent(asset.url)}`
+            : asset.url;
+
+        return (
+            <>
+                <img
+                    src={imageUrl}
+                    alt={asset.title}
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-cover transition-opacity duration-300"
+                    onError={(e) => {
+                        e.currentTarget.style.display = 'none';
+                        e.currentTarget.parentElement?.querySelector('.fallback-placeholder')?.classList.remove('hidden');
+                    }}
+                />
+
+                {/* Fallback Placeholder (Hidden by default unless onError triggers) */}
+                <div className="fallback-placeholder hidden w-full h-full flex items-center justify-center text-white text-4xl absolute top-0 left-0 pointer-events-none
+                    bg-gradient-to-br from-gray-800 to-black
+                ">
+                    {asset.platform === 'douyin' && <span>🎵</span>}
+                    {asset.platform === 'tiktok' && <span>🎵</span>}
+                    {asset.platform === 'instagram' && <span>📷</span>}
+                    {(!asset.platform || asset.platform === 'youtube') && <Video className="w-12 h-12 text-gray-400" />}
+                </div>
+            </>
+        );
     };
 
     const getIcon = () => {
         switch (asset.type) {
             case 'image': return <ImageIcon className="h-6 w-6 text-indigo-600 dark:text-indigo-400" />;
-            case 'video': return <Play className="h-6 w-6 text-rose-600 dark:text-rose-400" />;
+            case 'video':
+                if (asset.platform === 'douyin') return <span className="text-xl">🎵</span>;
+                if (asset.platform === 'tiktok') return <span className="text-xl">🎵</span>;
+                if (asset.platform === 'instagram') return <span className="text-xl">📷</span>;
+                if (asset.platform === 'xiaohongshu') return <span className="text-xl">📕</span>;
+                return <Play className="h-6 w-6 text-rose-600 dark:text-rose-400" />;
             case 'font': return <Type className="h-6 w-6 text-gray-600 dark:text-gray-400" />;
-            case 'channel': return <Tv className="h-6 w-6 text-indigo-600 dark:text-indigo-400" />;
+            case 'channel':
+                if (asset.platform === 'instagram') return <span className="text-xl">📷</span>;
+                if (asset.platform === 'tiktok') return <span className="text-xl">🎵</span>;
+                if (asset.platform === 'douyin') return <span className="text-xl">🎵</span>;
+                if (asset.platform === 'xiaohongshu') return <span className="text-xl">📕</span>;
+                return <Tv className="h-6 w-6 text-indigo-600 dark:text-indigo-400" />;
             default: return <File className="h-6 w-6 text-gray-600 dark:text-gray-400" />;
         }
     };
@@ -103,15 +174,24 @@ export default function AssetCard({ asset, variant = 'default', isSelected, onDo
                 const channelId = asset.youtubeChannelId || (asset.id.startsWith('channel-') ? asset.id.split('-')[1] : asset.id);
                 targetUrl = asset.channelUrl || `https://youtube.com/channel/${channelId}`;
             } else if (asset.type === 'video') {
-                const videoId = asset.youtubeVideoId ||
-                    (asset.id.startsWith('added-') || asset.id.startsWith('video-')
-                        ? asset.id.split('-')[1]
-                        : asset.id);
-                targetUrl = `https://youtube.com/watch?v=${videoId}`;
+                if (asset.platform && asset.platform !== 'youtube') {
+                    targetUrl = asset.redirectUrl || asset.url || '';
+                } else {
+                    const videoId = asset.youtubeVideoId ||
+                        (asset.id.startsWith('added-') || asset.id.startsWith('video-')
+                            ? asset.id.split('-')[1]
+                            : asset.id);
+                    targetUrl = `https://youtube.com/watch?v=${videoId}`;
+                }
             }
 
             if (targetUrl) {
-                window.open(targetUrl, '_blank', 'noopener,noreferrer');
+                // 데스크톱 앱 환경인 경우 내부 브라우저 뷰로 열기
+                if ((window as any).electron?.openYoutube) {
+                    (window as any).electron.openYoutube(targetUrl);
+                } else {
+                    window.open(targetUrl, '_blank', 'noopener,noreferrer');
+                }
             }
         }
     };
@@ -170,7 +250,8 @@ export default function AssetCard({ asset, variant = 'default', isSelected, onDo
                             <button
                                 onClick={(e) => {
                                     e.stopPropagation();
-                                    const url = asset.channelUrl || `https://youtube.com/channel/${asset.id}`;
+                                    const channelId = asset.youtubeChannelId || (asset.id.startsWith('channel-') ? asset.id.split('-')[1] : asset.id);
+                                    const url = asset.channelUrl || `https://youtube.com/channel/${channelId}`;
                                     navigator.clipboard.writeText(url);
                                     alert('채널 링크가 복사되었습니다.');
                                     setIsMenuOpen(false);
@@ -203,11 +284,7 @@ export default function AssetCard({ asset, variant = 'default', isSelected, onDo
             {/* Preview Area - Needs overflow-hidden locally for rounded top corners */}
             <div className={`${previewBgClasses} relative overflow-hidden rounded-t-xl`}>
                 {isUrl && asset.type !== 'channel' && (
-                    <img
-                        src={asset.url || ''}
-                        alt={asset.title}
-                        className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
-                    />
+                    renderThumbnail()
                 )}
                 {asset.type === 'channel' ? (
                     asset.avatarUrl ? (
@@ -234,8 +311,8 @@ export default function AssetCard({ asset, variant = 'default', isSelected, onDo
                 ) : null}
             </div>
 
-            {/* Info Area - Needs overflow-hidden locally for rounded bottom corners */}
-            <div className={`${isOverlay ? "p-3" : "p-4"} overflow-hidden rounded-b-xl`}>
+            {/* Info Area - Remove overflow-hidden to allow tooltip to overlap thumbnail */}
+            <div className={`${isOverlay ? "p-3" : "p-4"} rounded-b-xl`}>
                 <div className="flex items-start justify-between">
                     <div className="w-full">
                         {asset.type === 'channel' ? (
@@ -263,25 +340,30 @@ export default function AssetCard({ asset, variant = 'default', isSelected, onDo
                                     <>
                                         <p className="mt-1 w-full truncate text-[11px] text-gray-500 dark:text-gray-400">
                                             {asset.type === 'video' && asset.views !== undefined
-                                                ? `조회수 ${formatCompactNumber(asset.views)}`
+                                                ? (asset.platform === 'douyin' || asset.platform === 'xiaohongshu' ? `좋아요 ${formatCompactNumber(asset.views)}` : `조회수 ${formatCompactNumber(asset.views)}`)
                                                 : asset.size} • {asset.type === 'video' ? (asset.createdAt ? formatDate(asset.createdAt) : asset.updatedAt) : asset.updatedAt}
                                         </p>
                                         {asset.channelName && (
-                                            <p className="mt-2 w-full truncate text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/20 px-2 py-0.5 rounded-md">
-                                                {asset.channelName}
-                                            </p>
-                                        )}
-                                        {/* ✅ Memo indicator with tooltip */}
-                                        {asset.memo && (
-                                            <div className="group/memo relative mt-2">
-                                                <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 px-2 py-0.5 rounded-md cursor-help">
-                                                    📝 메모
-                                                </span>
-                                                {/* Tooltip on hover */}
-                                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-gray-900 dark:bg-zinc-700 text-white text-xs rounded-lg opacity-0 invisible group-hover/memo:opacity-100 group-hover/memo:visible transition-all duration-200 z-50 shadow-lg">
-                                                    <p className="break-words whitespace-pre-wrap">{asset.memo}</p>
-                                                    <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900 dark:border-t-zinc-700"></div>
-                                                </div>
+                                            <div className="relative w-full mt-2">
+                                                <p className="w-full truncate text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/20 px-2 py-0.5 rounded-md">
+                                                    {asset.channelName}
+                                                </p>
+                                                {/* ✅ Memo icon layer (overlay) - group/memo moved here to trigger only on icon hover */}
+                                                {asset.memo && (
+                                                    <div className="absolute right-1 top-1/2 -translate-y-1/2 z-20 group/memo">
+                                                        <span className="cursor-help text-[12px] filter drop-shadow-sm transition-all duration-300 hover:scale-150 hover:rotate-12 flex items-center justify-center active:scale-95">
+                                                            📝
+                                                        </span>
+                                                        {/* Premium Tooltip (White Speech Bubble) - Positioned over thumbnail */}
+                                                        <div className="absolute bottom-full right-[-8px] mb-3 w-[200px] p-3.5 bg-white/95 backdrop-blur-md text-gray-900 text-[11px] rounded-[20px] opacity-0 invisible group-hover/memo:opacity-100 group-hover/memo:visible transition-all duration-200 z-50 shadow-[0_20px_50px_-12px_rgba(0,0,0,0.25)] border border-white/60 ring-1 ring-black/5 dark:bg-zinc-800/95 dark:text-white dark:border-zinc-700/50">
+                                                            <p className="whitespace-pre-wrap break-words [word-break:keep-all] leading-relaxed font-medium">
+                                                                {asset.memo}
+                                                            </p>
+                                                            {/* Bubble pointer (White) */}
+                                                            <div className="absolute top-full right-3 border-[7px] border-transparent border-t-white/95 dark:border-t-zinc-800/95"></div>
+                                                        </div>
+                                                    </div>
+                                                )}
                                             </div>
                                         )}
                                     </>

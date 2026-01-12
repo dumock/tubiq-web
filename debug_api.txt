@@ -1,0 +1,27 @@
+[2026-01-02T16:36:51.986Z] [API] POST /api/videos called
+[2026-01-02T16:36:52.228Z] [API] User: a337f6d8-20fd-4c1d-9f89-b6814464f3ab
+[2026-01-02T16:36:52.229Z] [API] Processing 1 videos from extension
+[2026-01-02T16:37:00.706Z] [API] POST /api/videos called
+[2026-01-02T16:37:00.914Z] [API] User: a337f6d8-20fd-4c1d-9f89-b6814464f3ab
+[2026-01-02T16:37:00.916Z] [API] Processing 1 videos from extension
+[2026-01-02T16:39:03.273Z] [API] POST /api/videos called
+[2026-01-02T16:39:03.279Z] [API] User: No User
+[2026-01-02T16:39:44.285Z] [API] POST /api/videos called
+[2026-01-02T16:39:44.537Z] [API] User: a337f6d8-20fd-4c1d-9f89-b6814464f3ab
+[2026-01-02T16:39:44.539Z] [API] Processing 1 videos from extension
+[2026-01-02T16:39:44.540Z] [API] Missing channel_id for jf3IQAUjVmo, fetching from YouTube API...
+[2026-01-02T16:39:45.035Z] [API] Fetched channel_id: UC7jUUBy-YPsO_jKu9jRBGhQ
+[2026-01-02T16:39:45.221Z] [API] Creating new channel for UC7jUUBy-YPsO_jKu9jRBGhQ
+[2026-01-02T16:39:45.831Z] [API] Created channel: ec20d098-4a81-4e56-a340-3036b5772333
+[2026-01-02T16:39:45.833Z] [API] Crash: qsharerFolderId is not defined
+[2026-01-02T16:43:05.315Z] [API] POST /api/videos called
+[2026-01-02T16:43:05.321Z] [API] User: No User
+[2026-01-02T16:43:23.951Z] [API] POST /api/videos called
+[2026-01-02T16:43:24.222Z] [API] User: a337f6d8-20fd-4c1d-9f89-b6814464f3ab
+[2026-01-02T16:43:24.223Z] [API] Processing 1 videos from extension
+[2026-01-02T16:43:24.224Z] [API] Missing channel_id for PGi26oVcvKc, fetching from YouTube API...
+[2026-01-02T16:43:24.759Z] [API] Fetched channel_id: UC_6Xjm8MX29VmgcmFcrs85A
+[2026-01-02T16:43:24.979Z] [API] Creating new channel for UC_6Xjm8MX29VmgcmFcrs85A
+[2026-01-02T16:43:25.648Z] [API] Created channel: 28b54ab0-fd88-41c7-b3a5-1e545c9e1b76
+[2026-01-02T16:43:25.648Z] [API] Upserting 1 videos...
+[2026-01-02T16:43:25.905Z] [API] Success! Inserted/Updated: 1

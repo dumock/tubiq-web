@@ -36,7 +36,7 @@ DEFAULT_ACCOUNT_ID = os.getenv("DEFAULT_ACCOUNT_ID", "dumock")
 # ---------- ✅ Supabase 설정 ----------
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-SUPABASE_TABLE_CHANNELS = os.getenv("SUPABASE_TABLE_CHANNELS", "channels")
+SUPABASE_TABLE_CHANNELS = os.getenv("SUPABASE_TABLE_CHANNELS", "relay_channels")
 
 # ✅ videos 저장 테이블명: 강제로 relay_videos 고정
 SUPABASE_TABLE_VIDEOS = "relay_videos"
@@ -78,6 +78,8 @@ def detect_kind(url: str) -> str:
         return "channel"
     if "/shorts/" in u or "watch?v=" in u or "youtu.be/" in u:
         return "video"
+    if "tiktok.com/@" in u and "/video/" not in u:
+        return "channel"
     return "video"
 
 def detect_platform(url: str, hinted: Optional[str] = None) -> str:
@@ -179,6 +181,13 @@ def best_external_id(kind: str, platform: str, url: str, hinted_channel: Optiona
         if platform == "youtube":
             ids = parse_youtube_ids(url)
             return ids.get("video_id") or None
+        
+        if platform in ("tiktok", "douyin"):
+            vid = extract_tiktok_douyin_id(url)
+            if vid: return vid
+            # If short link (v.douyin, vt.tiktok), use hash of URL to ensure uniqueness in DB
+            return "url_" + sha256(url)[:12]
+            
         return None
 
     if hinted_channel:
@@ -186,6 +195,21 @@ def best_external_id(kind: str, platform: str, url: str, hinted_channel: Optiona
     if platform == "youtube":
         ids = parse_youtube_ids(url)
         return ids.get("channel_id") or (f"@{ids['handle']}" if ids.get("handle") else None)
+    if platform == "tiktok" and kind == "channel":
+        # Extract handle from https://www.tiktok.com/@handle?...
+        match = re.search(r"tiktok\.com/(@[\w\._]+)", url)
+        if match:
+            return match.group(1)
+    return None
+
+def extract_tiktok_douyin_id(url: str) -> Optional[str]:
+    # Try to extract 19-digit ID (common for Douyin/TikTok)
+    match = re.search(r"/video/(\d+)", url)
+    if match:
+        return match.group(1)
+    match = re.search(r"modal_id=(\d+)", url)
+    if match:
+        return match.group(1)
     return None
 
 # ---------- 인증 ----------
@@ -250,13 +274,21 @@ def _sse_format(event: str, data_obj: Dict[str, Any], eid: str) -> str:
 def _supabase_ready() -> bool:
     return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
 
-_COL_MISSING_RE = re.compile(r'column\s+"([^"]+)"\s+of\s+relation\s+"([^"]+)"\s+does\s+not\s+exist', re.IGNORECASE)
+_COL_MISSING_RE = re.compile(
+    r'(?:column\s+"([^"]+)"\s+of\s+relation\s+"([^"]+)"\s+does\s+not\s+exist'
+    r'|Could\s+not\s+find\s+the\s+\'([^\']+)\'\s+column\s+of\s+\'([^\']+)\'\s+in\s+the\s+schema\s+cache)',
+    re.IGNORECASE
+)
 
-def _strip_missing_columns_from_error(err_text: str) -> Optional[str]:
+def _extract_missing_col(err_text: str) -> Optional[str]:
     if not err_text:
         return None
     m = _COL_MISSING_RE.search(err_text)
-    return m.group(1) if m else None
+    if not m:
+        return None
+    # m.group(1) is for "column ... does not exist"
+    # m.group(3) is for "Could not find the '...' column"
+    return m.group(1) or m.group(3)
 
 def _looks_like_42p10(err_text: str) -> bool:
     if not err_text:
@@ -318,7 +350,7 @@ async def supabase_upsert_item(*, table: str, row: Dict[str, Any], on_conflict: 
                 return True, None
 
             if resp.status_code == 400:
-                missing_col = _strip_missing_columns_from_error(body)
+                missing_col = _extract_missing_col(body)
                 if missing_col and missing_col in current:
                     removed.append(missing_col)
                     current.pop(missing_col, None)
@@ -534,6 +566,127 @@ async def events(
     }
     return StreamingResponse(gen(), headers=headers)
 
+# ... (Existing imports)
+import shutil
+from pathlib import Path
+import ffmpeg
+from supabase import create_client, Client
+
+# ... (Existing config)
+
+# ---------- ✅ Supabase Client (For Video Processing) ----------
+supabase_client: Client = None
+if _supabase_ready():
+    supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+# ... (Existing code)
+
+# ---------- 🎬 비디오 처리 (FFmpeg) ----------
+class VideoProcessRequest(BaseModel):
+    video_path: str       # Supabase Storage Path (e.g., "user_id/video.mp4")
+    subtitles: List[Dict] # [{start, end, text}, ...]
+    options: Optional[Dict] = {}
+
+@app.post("/process-video", summary="비디오 처리 (자막 굽기 등)")
+async def process_video(req: VideoProcessRequest, user=Depends(require_user)):
+    if not supabase_client:
+        raise HTTPException(500, "Supabase client not initialized")
+
+    # 1. Setup paths
+    temp_dir = Path("temp_processing")
+    temp_dir.mkdir(exist_ok=True)
+    
+    local_input = temp_dir / Path(req.video_path).name
+    local_output = temp_dir / f"processed_{local_input.name}"
+    
+    try:
+        # 2. Download from Supabase
+        print(f"[FFMPEG] Downloading {req.video_path}...")
+        with open(local_input, "wb") as f:
+            res = supabase_client.storage.from_("videos").download(req.video_path)
+            f.write(res)
+
+        # 3. Generate SRT file for subtitles
+        srt_path = temp_dir / "subtitles.srt"
+        with open(srt_path, "w", encoding="utf-8") as f:
+            for i, sub in enumerate(req.subtitles):
+                start = _se_to_srt_time(sub['start'])
+                end = _se_to_srt_time(sub['end'])
+                text = sub['text']
+                f.write(f"{i+1}\n{start} --> {end}\n{text}\n\n")
+
+        # 4. Run FFmpeg (Burn Subtitles)
+        print(f"[FFMPEG] Processing {local_input} -> {local_output}...")
+        
+        # Cross-platform Font Path Strategy
+        import platform
+        system_os = platform.system()
+        
+        font_path = ""
+        font_name = ""
+        
+        if system_os == "Windows":
+            # Windows: Use Malgun Gothic
+            font_path = "C:/Windows/Fonts/malgun.ttf"
+            font_name = "Malgun Gothic"
+        else:
+            # Linux (CloudType/Docker): Use Noto Sans or similar (must be installed in Dockerfile)
+            # Fallback to a default font if specific one not found, usually needed for generic Linux
+            font_path = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf" 
+            font_name = "NanumGothic" # Assuming Nanum font installed in Docker
+
+        # Convert path for FFmpeg (escape backslashes on Windows if needed, though forward slashes work in FFmpeg usually)
+        # Using specific style for readability
+        style = f"FontName={font_name},FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,MarginV=20"
+
+        stream = ffmpeg.input(str(local_input))
+        
+        # Construct subtitle filter with proper escaping
+        # Note: In complex paths, strict escaping is needed. 
+        # For Windows, replace \ with / is usually safest for FFmpeg filter strings.
+        escaped_srt_path = str(srt_path).replace("\\", "/").replace(":", "\\:")
+        
+        stream = ffmpeg.output(stream, str(local_output), 
+                               **{'vf': f"subtitles='{escaped_srt_path}':force_style='{style}'"},
+                               acodec='copy')
+        
+        # Run with explicit error capture
+        try:
+            ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+        except ffmpeg.Error as e:
+            print(f"[FFMPEG] FFmpeg Error: {e.stderr.decode('utf8')}")
+            raise HTTPException(500, f"FFmpeg processing failed: {e.stderr.decode('utf8')}")
+
+        # 5. Upload Result to Supabase
+        output_path = f"processed/{req.video_path}"
+        print(f"[FFMPEG] Uploading to {output_path}...")
+        
+        with open(local_output, "rb") as f:
+            supabase_client.storage.from_("videos").upload(output_path, f, {"content-type": "video/mp4", "upsert": "true"})
+
+        # Get Signed URL for result
+        res = supabase_client.storage.from_("videos").create_signed_url(output_path, 3600 * 24) # 24 hours
+        
+        return {"ok": True, "url": res["signedUrl"]}
+
+    except Exception as e:
+        print(f"[FFMPEG] Error: {e}")
+        raise HTTPException(500, f"Processing failed: {str(e)}")
+    finally:
+        # Cleanup
+        if local_input.exists(): local_input.unlink()
+        if local_output.exists(): local_output.unlink()
+        if (temp_dir / "subtitles.srt").exists(): (temp_dir / "subtitles.srt").unlink()
+
+
+def _se_to_srt_time(seconds: float) -> str:
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    ms = int((s - int(s)) * 1000)
+    return f"{int(h):02d}:{int(m):02d}:{int(s):02d},{ms:03d}"
+
 if __name__ == "__main__":
     import uvicorn
+    # Local execution specific
+    print("🚀 Local Relay Server Started on port 8080")
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)), access_log=True)

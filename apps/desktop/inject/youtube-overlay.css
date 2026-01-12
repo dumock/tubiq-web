@@ -1,0 +1,72 @@
+/* YouTube Download Overlay Button */
+.tubiq-download-overlay {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    z-index: 2000;
+    width: 48px;
+    height: 48px;
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    opacity: 0;
+    pointer-events: none;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    color: white;
+}
+
+/* Show when player is hovered or has specific class */
+.html5-video-player:hover .tubiq-download-overlay,
+.tubiq-download-overlay.visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+.tubiq-download-overlay:hover {
+    background: rgba(139, 92, 246, 0.8);
+    /* Accent Primary */
+    transform: scale(1.1);
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
+.tubiq-download-overlay:active {
+    transform: scale(0.95);
+}
+
+.tubiq-download-overlay svg {
+    width: 24px;
+    height: 24px;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+}
+
+/* Pulsing effect when downloading starts */
+@keyframes tubiq-pulse {
+    0% {
+        transform: scale(1);
+        opacity: 1;
+    }
+
+    50% {
+        transform: scale(1.2);
+        opacity: 0.7;
+    }
+
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+.tubiq-download-overlay.loading {
+    animation: tubiq-pulse 1s infinite;
+    background: rgba(16, 185, 129, 0.8);
+    /* Success Color */
+}

@@ -1,0 +1,26 @@
+{
+  "channel": {
+    "id": "0cb5ce24-4245-4895-b9c6-5d6741d93fd3",
+    "user_id": "a337f6d8-20fd-4c1d-9f89-b6814464f3ab",
+    "folder_id": null,
+    "youtube_channel_id": "UCE9LgqslvlZIySGMCKg89sQ",
+    "title": "쓸모한방울",
+    "thumbnail_url": "https://yt3.ggpht.com/IxJB0X98LosY1SNommJoIFepw7GyFms6RE7AysHwdm_dqvi9bIq67D5MeqjcWzWE4BNhP1U3=s88-c-k-c0x00ffffff-no-rj",
+    "subscriber_count": 5430,
+    "channel_created_at": "2025-06-18",
+    "added_at": "2026-01-05T21:42:55.897741+00:00",
+    "status": "active",
+    "published_at": null,
+    "scope": "videos",
+    "topics_cached": []
+  },
+  "userLinks": [
+    {
+      "id": "12b9bed9-7762-4def-aeff-68b4e010ca58",
+      "user_id": "a337f6d8-20fd-4c1d-9f89-b6814464f3ab",
+      "channel_id": "0cb5ce24-4245-4895-b9c6-5d6741d93fd3",
+      "folder_id": null,
+      "created_at": "2026-01-05T21:48:43.526701+00:00"
+    }
+  ]
+}

@@ -10,6 +10,7 @@ import AddVideoModal from '@/components/AddVideoModal';
 import ConfirmModal from '@/components/ConfirmModal';
 import { useFolders } from '@/hooks/useFolders';
 import { useVideos } from '@/hooks/useVideos';
+import { useYouTubeApi } from '@/hooks/useYouTubeApi';
 import { Asset } from '@/types';
 import { Plus, Video as VideoIcon, Trash2 } from 'lucide-react';
 import {
@@ -55,6 +56,7 @@ export default function VideoAssetsPage() {
     });
 
     // Data State - from hooks (scope='videos' for separate folders from channel-assets)
+    const { fetchYouTube, config } = useYouTubeApi();
     const { folders, createFolder, renameFolder, deleteFolder } = useFolders('videos');
     const { videos: videoAssets, setVideos: setVideoAssets, saveVideos, deleteVideo, clearAllVideos, fetchVideos, updateVideoFolder } = useVideos();
     const [isLoading, setIsLoading] = useState(false);
@@ -96,51 +98,297 @@ export default function VideoAssetsPage() {
     };
 
     // SAVE VIDEO - fetch real video info from YouTube API
-    const handleSaveVideo = async (url: string) => {
-        const videoId = getYoutubeId(url);
-        if (!videoId) {
-            alert('올바른 유튜브 링크가 아닙니다.');
-            return;
+    // SAVE VIDEO - fetch real video info from YouTube API or save generic
+    const handleSaveVideo = async (inputStr: string) => {
+        // 1. Extract URL and Title from potential mixed text (Douyin/TikTok style)
+        // Regex to find http/https URLs
+        const urlRegex = /(https?:\/\/[^\s]+)/g;
+        const urlMatch = inputStr.match(urlRegex);
+
+        let url = inputStr.trim();
+        let titleFromText = '';
+
+        if (urlMatch && urlMatch.length > 0) {
+            url = urlMatch[0]; // Use the first found URL
+            // Remove the URL from the input string to get the title
+            titleFromText = inputStr.replace(url, '').trim();
+            // Optional: Clean up common prefixes like "8.97 ZzG:/" or "复制此链接..."
+            // But usually keeping the text is safer. We can trim "复制此链接..." if needed.
+            titleFromText = titleFromText
+                .replace(/复制此链接，打开Dou音搜索，直接观看视频！/g, '')
+                .replace(/^[0-9.]+\s+[A-Za-z0-9]+:\/\s+/, '') // Remove "8.97 ZzG:/" style prefix
+                .trim();
         }
 
-        try {
-            // Fetch actual video info from YouTube API
-            const res = await fetch(`/api/youtube/video-info?videoId=${videoId}`);
-            const data = await res.json();
+        const videoId = getYoutubeId(url);
+        const currentFolderId = selectedFolderId === 'all' ? null : selectedFolderId;
+        const nowStr = new Date().toISOString();
 
-            if (!data.ok || !data.video) {
-                alert(data.message || '영상 정보를 가져올 수 없습니다.');
-                return;
+        // 2. YouTube Video (Logic remains similar)
+        if (videoId) {
+            try {
+                // Fetch actual video info from YouTube API
+                const res = await fetchYouTube(`/api/youtube/video-info?videoId=${videoId}`);
+                const data = await res.json();
+
+                if (!data.ok || !data.video) {
+                    alert(data.message || '영상 정보를 가져올 수 없습니다.');
+                    return;
+                }
+
+                const videoInfo = data.video;
+                const newVideo: Asset = {
+                    id: `video-${Date.now()}`,
+                    type: 'video',
+                    platform: 'youtube',
+                    title: videoInfo.title,
+                    size: '-',
+                    createdAt: videoInfo.publishedAt?.split('T')[0] || nowStr.split('T')[0],
+                    updatedAt: new Date().toLocaleDateString(),
+                    url: videoInfo.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
+                    folderId: currentFolderId || 'all',
+                    views: videoInfo.viewCount || 0,
+                    channelName: videoInfo.channelTitle || 'Unknown Channel',
+                    youtubeVideoId: videoId,
+                    youtubeChannelId: videoInfo.channelId
+                };
+
+                // Save to DB
+                await saveVideos([newVideo]);
+                setVideoAssets(prev => [newVideo, ...prev]);
+                setMoveNotification('영상(YouTube)이 저장되었습니다.');
+                setTimeout(() => setMoveNotification(null), 2000);
+                setIsModalOpen(false);
+            } catch (error) {
+                console.error('Error saving video:', error);
+                alert('영상 저장 중 오류가 발생했습니다.');
             }
+        }
+        // 3. Non-YouTube Video (TikTok, Instagram, Xiaohongshu via TikHub API, or Douyin via Electron)
+        else {
+            try {
+                // Infer platform
+                let platform = 'web';
+                if (url.includes('douyin')) platform = 'douyin';
+                else if (url.includes('tiktok')) platform = 'tiktok';
+                else if (url.includes('instagram')) platform = 'instagram';
+                else if (url.includes('xiaohongshu') || url.includes('xhslink')) platform = 'xiaohongshu';
 
-            const videoInfo = data.video;
-            const currentFolderId = selectedFolderId === 'all' ? null : selectedFolderId;
+                let scrapedData: any = {};
+                let usedTikHub = false;
 
-            const newVideo: Asset = {
-                id: `video-${Date.now()}`,
-                type: 'video',
-                title: videoInfo.title,
-                size: '-',
-                createdAt: videoInfo.publishedAt?.split('T')[0] || new Date().toISOString().split('T')[0],
-                updatedAt: new Date().toLocaleDateString(),
-                url: videoInfo.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
-                folderId: currentFolderId || 'all',
-                views: videoInfo.viewCount || 0,
-                channelName: videoInfo.channelTitle || 'Unknown Channel',
-                youtubeVideoId: videoId,
-                youtubeChannelId: videoInfo.channelId // Add channel ID for DB
-            };
+                // TikTok, Instagram, Xiaohongshu: Use TikHub API
+                if (platform === 'tiktok' || platform === 'instagram' || platform === 'xiaohongshu') {
+                    console.log(`[Client] Fetching ${platform} video via TikHub API...`);
 
-            // Save to DB
-            await saveVideos([newVideo]);
+                    // Try Client-Side Fetch for Instagram first (to bypass server-side 401 issues)
+                    if (platform === 'instagram') {
+                        const tikHubKeys = config?.tikhub?.keys || [];
+                        const activeKeyEntry = tikHubKeys.find(k => k.active);
+                        const activeKey = activeKeyEntry?.key;
 
-            setVideoAssets(prev => [newVideo, ...prev]);
-            setMoveNotification('영상이 저장되었습니다.');
-            setTimeout(() => setMoveNotification(null), 2000);
-            setIsModalOpen(false);
-        } catch (error) {
-            console.error('Error saving video:', error);
-            alert('영상 저장 중 오류가 발생했습니다.');
+                        if (activeKey) {
+                            console.log('[Client] Attempting Direct Instagram Fetch (V1)...');
+                            try {
+                                const tikHubApiUrl = `https://api.tikhub.io/api/v1/instagram/v1/fetch_post_by_url?post_url=${encodeURIComponent(url)}`;
+                                const res = await fetch(tikHubApiUrl, {
+                                    headers: {
+                                        'Authorization': `Bearer ${activeKey}`,
+                                        'Accept': 'application/json'
+                                    }
+                                });
+
+                                if (res.ok) {
+                                    const tikHubData = await res.json();
+                                    const data = tikHubData?.data || tikHubData; // V1 structure
+
+                                    // Parse V1 Data
+                                    // V1 returns 'thumbnail_src', 'display_url'
+
+                                    const v = data?.items?.[0] || data;
+                                    if (v) {
+                                        // Title Parsing (V1 often nests caption)
+                                        let title = v.caption?.text || '';
+                                        if (!title && v.edge_media_to_caption?.edges?.[0]?.node?.text) {
+                                            title = v.edge_media_to_caption.edges[0].node.text;
+                                        }
+
+                                        // Thumbnail Parsing (Prioritize display_url as it's often the main image)
+                                        const thumb = v.thumbnail_src || v.display_url || v.image_versions2?.candidates?.[0]?.url || v.thumbnail_url || '';
+
+                                        scrapedData = {
+                                            title: title.slice(0, 100) || 'Instagram Feed',
+                                            thumbnail_url: thumb,
+                                            channel_name: v.user?.username || v.owner?.username || 'Unknown',
+                                            views: v.view_count || v.video_view_count || 0,
+                                            date: new Date().toISOString(),
+                                            url: url
+                                        };
+
+                                        if (v.taken_at_timestamp) {
+                                            scrapedData.date = new Date(v.taken_at_timestamp * 1000).toISOString();
+                                        } else if (v.taken_at) {
+                                            scrapedData.date = new Date(v.taken_at * 1000).toISOString();
+                                        }
+
+                                        usedTikHub = true;
+                                        console.log('[Client] Direct Instagram Fetch SUCCESS:', scrapedData);
+                                    }
+                                } else {
+                                    console.warn('[Client] Direct Instagram Fetch Failed:', res.status);
+                                }
+                            } catch (err) {
+                                console.error('[Client] Direct Instagram Fetch Error:', err);
+                            }
+                        }
+                    }
+
+                    // Try Client-Side Fetch for Xiaohongshu (V2)
+                    if (platform === 'xiaohongshu') {
+                        const tikHubKeys = config?.tikhub?.keys || [];
+                        const activeKeyEntry = tikHubKeys.find(k => k.active);
+                        const activeKey = activeKeyEntry?.key;
+
+                        if (activeKey) {
+                            console.log('[Client] Attempting Direct Xiaohongshu Fetch (V2)...');
+                            // Use V2 as it provides exact stats (V3 is bucketed) and correct timestamps
+
+                            try {
+                                // Extract Note ID for V2
+                                // URLs are like: https://www.xiaohongshu.com/discovery/item/69413e48000000001e038b46 or explored
+                                const noteIdMatch = url.match(/explore\/([a-f0-9]+)/) || url.match(/discovery\/item\/([a-f0-9]+)/);
+                                const noteId = noteIdMatch ? (noteIdMatch[1] || noteIdMatch[2]) : null;
+
+                                if (noteId) {
+                                    const tikHubApiUrl = `https://api.tikhub.io/api/v1/xiaohongshu/web_v2/fetch_feed_notes_v2?note_id=${noteId}`;
+                                    const res = await fetch(tikHubApiUrl, {
+                                        headers: {
+                                            'Authorization': `Bearer ${activeKey}`,
+                                            'Accept': 'application/json'
+                                        }
+                                    });
+
+                                    if (res.ok) {
+                                        const tikHubData = await res.json();
+                                        const data = tikHubData?.data || tikHubData;
+
+                                        // V2 structure: data.note_list is an array
+                                        const v = data?.note_list?.[0];
+
+                                        if (v) {
+                                            // Date parsing: V2 'time' is seconds (e.g. 1765883464)
+                                            let dateStr = new Date().toISOString();
+                                            if (v.time) {
+                                                // Convert seconds to milliseconds
+                                                dateStr = new Date(v.time * 1000).toISOString();
+                                            } else if (v.last_update_time) {
+                                                dateStr = new Date(v.last_update_time * 1000).toISOString();
+                                            }
+
+                                            scrapedData = {
+                                                title: v.title || v.desc || 'Xiaohongshu Note',
+                                                thumbnail_url: v.images_list?.[0]?.url || v.images_list?.[0]?.original || '',
+                                                channel_name: v.user?.nickname || 'Unknown',
+                                                // V2 gives exact numbers for liked_count
+                                                views: v.liked_count || 0,
+                                                date: dateStr,
+                                                url: url
+                                            };
+
+                                            usedTikHub = true;
+                                            console.log('[Client] Direct Xiaohongshu Fetch (V2) SUCCESS:', scrapedData);
+                                        }
+                                    } else {
+                                        console.warn('[Client] Direct Xiaohongshu V2 Fetch Failed:', res.status);
+                                    }
+                                } else {
+                                    console.warn('[Client] Could not extract Note ID for Xiaohongshu V2 API. URL:', url);
+                                }
+                            } catch (err) {
+                                console.error('[Client] Direct Xiaohongshu Fetch Error:', err);
+                            }
+                        }
+                    }
+
+                    // Fallback to Server Proxy if Client-Side failed
+                    if (!usedTikHub) {
+                        try {
+                            const tikHubRes = await fetch(`/api/tikhub/resolve-video?url=${encodeURIComponent(url)}`);
+                            const tikHubData = await tikHubRes.json();
+
+                            if (tikHubData.ok && tikHubData.video) {
+                                scrapedData = {
+                                    title: tikHubData.video.title,
+                                    thumbnail_url: tikHubData.video.thumbnailUrl,
+                                    channel_name: tikHubData.video.authorName,
+                                    views: tikHubData.video.viewCount,
+                                    date: tikHubData.video.publishedAt,
+                                    url: tikHubData.video.videoUrl || url
+                                };
+                                usedTikHub = true;
+                                console.log('[Client] TikHub API (Server) success:', scrapedData);
+                            } else {
+                                console.warn('[Client] TikHub API (Server) failed:', tikHubData.message);
+                            }
+                        } catch (tikHubError) {
+                            console.error('[Client] TikHub API (Server) error:', tikHubError);
+                        }
+                    }
+                }
+
+                // Douyin or fallback: Use Electron Client-side Scraping
+                if (!usedTikHub && (window as any).electron?.scrapeMetadata) {
+                    console.log('[Client] Scraping metadata via Electron...');
+                    const scrapeRes = await (window as any).electron.scrapeMetadata(url);
+                    console.log('[Client] raw scrapeRes:', scrapeRes);
+                    if (scrapeRes && scrapeRes.success) {
+                        scrapedData = scrapeRes;
+                        console.log('[Client] Scrape success:', scrapedData);
+                    }
+                }
+
+                // Parse Date safely
+                const createdDate = scrapedData.date
+                    ? scrapedData.date
+                    : nowStr.split('T')[0];
+
+                const newVideo: Asset = {
+                    id: `video-${Date.now()}`,
+                    type: 'video',
+                    platform: platform,
+                    title: scrapedData.title || titleFromText || `새 동영상 (${platform})`,
+                    size: '-',
+                    createdAt: createdDate.includes('-') ? createdDate.split('T')[0] : nowStr.split('T')[0],
+                    updatedAt: new Date().toLocaleDateString(),
+                    url: scrapedData.thumbnail_url || scrapedData.url || url,
+                    folderId: currentFolderId || 'all',
+                    views: scrapedData.views || 0,
+                    channelName: scrapedData.channel_name || 'Unknown Source',
+                    youtubeVideoId: `ext-${Date.now()}`,
+                    youtubeChannelId: 'channel-ext',
+                    memo: usedTikHub ? `TikHub API (${platform})` : '수동 추가된 링크'
+                };
+
+                const assetPayload = {
+                    ...newVideo,
+                    redirectUrl: scrapedData.url || url
+                };
+
+                await saveVideos([assetPayload]);
+
+                setVideoAssets(prev => [newVideo, ...prev]);
+                const platformName = platform === 'tiktok' ? 'TikTok' :
+                    platform === 'instagram' ? 'Instagram' :
+                        platform === 'xiaohongshu' ? '샤오홍슈' :
+                            platform === 'douyin' ? 'Douyin' : '링크';
+                setMoveNotification(`${platformName} 영상이 저장되었습니다.`);
+                setTimeout(() => setMoveNotification(null), 2000);
+                setIsModalOpen(false);
+
+            } catch (error) {
+                console.error('Error saving generic video:', error);
+                alert('링크 저장 중 오류가 발생했습니다.');
+            }
         }
     };
 
@@ -425,11 +673,25 @@ export default function VideoAssetsPage() {
             const channelId = asset.youtubeChannelId || (asset.id.startsWith('channel-') ? asset.id.split('-')[1] : asset.id);
             targetUrl = asset.channelUrl || `https://youtube.com/channel/${channelId}`;
         } else if (asset.type === 'video') {
-            const videoId = asset.youtubeVideoId ||
-                (asset.id.startsWith('added-') || asset.id.startsWith('video-')
-                    ? asset.id.split('-')[1]
-                    : asset.id);
-            targetUrl = `https://youtube.com/watch?v=${videoId}`;
+            // Check for explicit redirectUrl (video content) or non-YouTube platforms
+            if (asset.redirectUrl || (asset.platform && asset.platform !== 'youtube' && asset.platform !== 'web')) {
+                // Prioritize redirectUrl, fallback to asset.url if it looks like a content link (but asset.url is often thumbnail)
+                // Actually, if platform is not youtube, we should trust redirectUrl primarily.
+                targetUrl = asset.redirectUrl || asset.url || '';
+            } else {
+                const videoId = asset.youtubeVideoId ||
+                    (asset.id.startsWith('added-') || asset.id.startsWith('video-')
+                        ? asset.id.split('-')[1]
+                        : asset.id);
+
+                // Validate if it looks like a real YouTube ID (not timestamp-based ID)
+                if (videoId && !videoId.startsWith('ext-') && !videoId.startsWith('video-')) {
+                    targetUrl = `https://youtube.com/watch?v=${videoId}`;
+                } else {
+                    // Fallback to raw URL if available
+                    targetUrl = asset.redirectUrl || asset.url || '';
+                }
+            }
         }
         if (targetUrl) {
             window.open(targetUrl, '_blank', 'noopener,noreferrer');

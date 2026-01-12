@@ -2,13 +2,17 @@
 
 import { createClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
+import dotenv from 'dotenv';
+
+// Load env vars
+dotenv.config({ path: '.env.local' });
 
 /**
  * ================================
  * ENV
  * ================================
  */
-const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 // YOUTUBE_API_KEY_1, YOUTUBE_API_KEY_2, ...
@@ -112,6 +116,7 @@ async function fetchAllChannelsFromDB() {
     const { data, error } = await supabase
       .from('channels')
       .select('id, youtube_channel_id')
+      .eq('scope', 'analysis') // Only collect stats for analysis channels
       .not('youtube_channel_id', 'is', null)
       .range(from, to);
 

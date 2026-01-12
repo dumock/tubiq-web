@@ -1,0 +1,10 @@
+Status: 400
+Error: {
+  "error": {
+    "code": 400,
+    "message": "Audio input modality is not enabled for this model",
+    "status": "INVALID_ARGUMENT"
+  }
+}
+
+MIME: audio/mpeg

@@ -1,7 +1,7 @@
 "use client";
 
 import React from 'react';
-import { X, CheckCircle2, Circle, Youtube } from 'lucide-react';
+import { X, CheckCircle2, Circle } from 'lucide-react';
 import { useMyChannelStore } from '@/lib/myChannelStore';
 
 interface Props {
@@ -44,8 +44,8 @@ export function MyChannelList({ isOpen, onClose }: Props) {
                             <button
                                 onClick={() => toggleTracking(channel.channelId)}
                                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${channel.trackingEnabled
-                                        ? 'bg-indigo-600 text-white'
-                                        : 'bg-gray-100 text-gray-400 dark:bg-zinc-700'
+                                    ? 'bg-indigo-600 text-white'
+                                    : 'bg-gray-100 text-gray-400 dark:bg-zinc-700'
                                     }`}
                             >
                                 {channel.trackingEnabled ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Circle className="w-3.5 h-3.5" />}

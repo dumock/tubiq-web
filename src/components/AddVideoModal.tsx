@@ -20,16 +20,16 @@ export default function AddVideoModal({ isOpen, onClose, onSave }: AddVideoModal
         setError('');
 
         if (!input.trim()) {
-            setError('유튜브 영상 링크를 입력해주세요.');
+            setError('영상 링크를 입력해주세요.');
             return;
         }
 
-        // Simple YouTube URL validation
-        const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/;
-        if (!youtubeRegex.test(input)) {
-            setError('올바른 유튜브 영상 링크를 입력해주세요.');
-            return;
-        }
+        // Allow any URL
+        // const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/;
+        // if (!youtubeRegex.test(input)) {
+        //     setError('올바른 유튜브 영상 링크를 입력해주세요.');
+        //     return;
+        // }
 
         onSave(input);
         setInput('');
@@ -62,7 +62,7 @@ export default function AddVideoModal({ isOpen, onClose, onSave }: AddVideoModal
                 <form onSubmit={handleSubmit} className="p-6">
                     <div className="mb-6">
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                            유튜브 영상 링크
+                            영상 링크 (유튜브, 도우인 등)
                         </label>
                         <input
                             type="text"
@@ -78,8 +78,8 @@ export default function AddVideoModal({ isOpen, onClose, onSave }: AddVideoModal
                             </p>
                         )}
                         <p className="mt-2 text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
-                            예: https://www.youtube.com/watch?v=dQw4w9WgXcQ<br />
-                            또는 https://youtu.be/dQw4w9WgXcQ
+                            예: https://www.youtube.com/watch?v=...<br />
+                            또는 https://www.douyin.com/video/...
                         </p>
                     </div>
 

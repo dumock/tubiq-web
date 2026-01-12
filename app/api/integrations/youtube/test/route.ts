@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
+import { getYoutubeApiKey } from '@/lib/api-keys-server';
 
 const TEST_CHANNEL_ID = 'UC_x5XG1OV2P6uZZ5FSM9Ttw';
 
-export async function GET() {
-    const apiKey = process.env.YOUTUBE_API_KEY;
+export async function GET(request: Request) {
+    const apiKey = await getYoutubeApiKey(request);
 
     if (!apiKey) {
         return NextResponse.json({ ok: false, message: "missing api key" }, { status: 400 });

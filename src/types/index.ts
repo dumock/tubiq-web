@@ -1,6 +1,7 @@
 export interface Asset {
     id: string;
     type: 'channel' | 'video' | 'image' | 'font';
+    platform?: 'youtube' | 'douyin' | string; // ✅ NEW: Platform support
     title: string;
     channelName?: string;
     subscribers?: number;
@@ -9,6 +10,8 @@ export interface Asset {
     size: string;
     updatedAt: string;
     url?: string; // Thumbnail or background
+    thumbnailUrl?: string; // Explicit thumbnail URL
+    duration?: string; // Video duration
     folderId?: string | null;
     avatarUrl?: string;
     channelUrl?: string;
@@ -20,6 +23,7 @@ export interface Asset {
     viewCount?: number;
     videoCount?: number;
     memo?: string; // ✅ NEW: memo from Q-Sharer app
+    redirectUrl?: string; // ✅ NEW: Actual content URL (DB 'url' column) for non-YouTube video redirection
 }
 
 export interface Folder {

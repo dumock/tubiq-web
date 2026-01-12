@@ -1,22 +1,17 @@
 import { NextResponse } from 'next/server';
+import { getYoutubeApiKey } from '@/lib/api-keys-server';
 
 export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const videoId = searchParams.get('videoId');
-    const apiKey = process.env.YOUTUBE_API_KEY;
-
-    if (!apiKey) {
-        return NextResponse.json(
-            { ok: false, message: 'missing api key' },
-            { status: 400 }
-        );
-    }
+    const apiKey = await getYoutubeApiKey(request);
 
     if (!videoId) {
-        return NextResponse.json(
-            { ok: false, message: 'missing videoId' },
-            { status: 400 }
-        );
+        return NextResponse.json({ ok: false, message: "videoId required" }, { status: 400 });
+    }
+
+    if (!apiKey) {
+        return NextResponse.json({ ok: false, message: "missing api key" }, { status: 400 });
     }
 
     try {

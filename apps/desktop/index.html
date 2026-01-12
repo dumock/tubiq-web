@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https: blob: file:; connect-src 'self' http://localhost:3000 https://*.supabase.co tubiq-resource: file:; worker-src blob:; media-src 'self' tubiq-resource: file: blob: data: *;">
+    <title>TubiQ Desktop</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <!-- Custom Title Bar -->
+    <div class="title-bar" id="titleBar">
+        <div class="title-bar-content">
+            <div class="app-logo">
+                <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                    <rect width="28" height="28" rx="6" fill="url(#logo-gradient)" />
+                    <path d="M8 10L14 6L20 10V18L14 22L8 18V10Z" fill="white" fill-opacity="0.9" />
+                    <polygon points="14,9 17,11 17,15 14,17 11,15 11,11" fill="url(#logo-gradient)" />
+                    <defs>
+                        <linearGradient id="logo-gradient" x1="0" y1="0" x2="28" y2="28">
+                            <stop offset="0%" stop-color="#8B5CF6" />
+                            <stop offset="100%" stop-color="#6366F1" />
+                        </linearGradient>
+                    </defs>
+                </svg>
+                <span class="app-title">TubiQ</span>
+            </div>
+            <div class="window-controls">
+                <button class="win-btn minimize" onclick="electron.minimize()">
+                    <svg width="12" height="12" viewBox="0 0 12 12">
+                        <rect y="5" width="12" height="2" fill="currentColor" />
+                    </svg>
+                </button>
+                <button class="win-btn maximize" id="maximizeBtn" onclick="electron.maximize()">
+                    <svg width="12" height="12" viewBox="0 0 12 12">
+                        <rect x="1" y="1" width="10" height="10" stroke="currentColor" stroke-width="2" fill="none" />
+                    </svg>
+                </button>
+                <button class="win-btn close" onclick="electron.close()">
+                    <svg width="12" height="12" viewBox="0 0 12 12">
+                        <path d="M1 1L11 11M11 1L1 11" stroke="currentColor" stroke-width="2" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="app-container">
+        <!-- Activity Bar (Left) - Always Visible -->
+        <div class="activity-bar">
+            <!-- Menu Toggle at Top -->
+            <button class="menu-toggle-btn" id="menuToggleBtn" title="Toggle Menu">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <line x1="3" y1="6" x2="21" y2="6" />
+                    <line x1="3" y1="12" x2="21" y2="12" />
+                    <line x1="3" y1="18" x2="21" y2="18" />
+                </svg>
+            </button>
+            <div class="activity-icons-top">
+                <button class="activity-icon active" data-section="search" title="Search">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8" />
+                        <path d="M21 21l-4.35-4.35" />
+                    </svg>
+                </button>
+                <button class="activity-icon" data-section="sparkles" title="Favorites">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="12 2 15 8.5 22 9 17 14 18.5 21 12 17.5 5.5 21 7 14 2 9 9 8.5 12 2" />
+                    </svg>
+                </button>
+                <button class="activity-icon" data-section="snippets" title="My Snippets">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                        <path d="M2 17l10 5 10-5" />
+                        <path d="M2 12l10 5 10-5" />
+                    </svg>
+                </button>
+                <button class="activity-icon" data-section="explorer" title="File Explorer">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    </svg>
+                </button>
+            </div>
+            <div class="activity-icons-bottom">
+                <button class="activity-icon" title="Quick Action">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                    </svg>
+                </button>
+                <!-- User Profile / Login -->
+                <div id="userSection" class="user-section">
+                    <button class="activity-icon user-btn" id="userBtn" title="Login">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="#8B5CF6" fill-opacity="0.2">
+                            <circle cx="12" cy="12" r="10" stroke="#8B5CF6" stroke-width="2" />
+                            <path d="M7 16c0-2.2 1.8-4 4-4s4 1.8 4 4" stroke="#8B5CF6" stroke-width="2" />
+                            <circle cx="12" cy="8" r="2" stroke="#8B5CF6" stroke-width="2" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Side Panel (Slides in/out) -->
+        <div class="side-panel" id="sidePanel">
+            <div class="side-panel-header">
+                <h2 class="side-panel-title" id="sidePanelTitle">LIBRARY</h2>
+            </div>
+            <nav class="side-nav" id="sideNav">
+                <!-- Dynamic content -->
+            </nav>
+        </div>
+
+        <!-- File Picker Overlay (Slides over side panel) -->
+        <div class="file-picker-overlay" id="filePickerOverlay">
+            <div class="file-picker-header">
+                <h2 class="file-picker-title">FILE PICKER</h2>
+                <button class="file-picker-close" id="filePickerClose" title="Close">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2.5">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            <div class="file-picker-drives">
+                <button class="drive-btn" onclick="openFilePicker('C:\\\\')">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="22" y1="12" x2="2" y2="12" />
+                        <path
+                            d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+                    </svg>
+                    C:
+                </button>
+                <button class="drive-btn" onclick="openFilePicker('D:\\\\')">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="22" y1="12" x2="2" y2="12" />
+                        <path
+                            d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+                    </svg>
+                    D:
+                </button>
+                <button class="drive-btn" onclick="openFilePicker('desktop')">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                        <line x1="8" y1="21" x2="16" y2="21" />
+                        <line x1="12" y1="17" x2="12" y2="21" />
+                    </svg>
+                    Desktop
+                </button>
+            </div>
+            <div class="file-picker-path" id="filePickerPath">Select a drive</div>
+            <div class="file-picker-content" id="filePickerContent">
+                <!-- Dynamic file list -->
+            </div>
+        </div>
+
+        <!-- Main Workspace -->
+        <div class="main-workspace" id="mainWorkspace">
+            <div class="main-header" id="mainHeader">
+                <!-- Dynamic Title & Actions -->
+            </div>
+            <div class="workspace-content" id="workspaceContent">
+                <!-- Dynamic content -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Login Modal -->
+    <div id="loginModal" class="login-modal" style="display: none;">
+        <div class="login-overlay" id="loginOverlay"></div>
+        <div class="login-card">
+            <div class="login-header">
+                <h3>Sign in to TubiQ</h3>
+                <p>Enter your details to sync with web</p>
+            </div>
+            <div class="login-body">
+                <div class="input-group">
+                    <label for="emailInput">Email</label>
+                    <input type="email" id="emailInput" placeholder="name@example.com">
+                </div>
+                <div class="input-group">
+                    <label for="passwordInput">Password</label>
+                    <input type="password" id="passwordInput" placeholder="••••••••">
+                </div>
+                <button id="signInBtn" class="primary-login-btn">Sign In</button>
+
+                <div class="login-divider">
+                    <span>Or continue with</span>
+                </div>
+
+                <button id="googleLoginBtn" class="google-login-btn">
+                    <svg width="20" height="20" viewBox="0 0 24 24">
+                        <path
+                            d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                            fill="#4285F4" />
+                        <path
+                            d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                            fill="#34A853" />
+                        <path
+                            d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"
+                            fill="#FBBC05" />
+                        <path
+                            d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                            fill="#EA4335" />
+                    </svg>
+                    Google
+                </button>
+            </div>
+            <div class="login-footer">
+                <button id="closeLoginBtn" class="close-login-btn">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Download Progress Modal -->
+    <div id="downloadModal" class="download-modal" style="display: none;">
+        <div class="download-modal-content">
+            <div class="download-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+            </div>
+            <div class="download-title" id="downloadTitle">다운로드 중...</div>
+            <div class="download-filename" id="downloadFilename">영상 제목</div>
+            <div class="download-progress-container">
+                <div class="download-progress-bar" id="downloadProgressBar"></div>
+            </div>
+            <div class="download-status" id="downloadStatus">준비 중...</div>
+        </div>
+    </div>
+
+    <script src="./node_modules/wavesurfer.js/dist/wavesurfer.min.js"></script>
+    <script src="./node_modules/wavesurfer.js/dist/plugins/regions.min.js"></script>
+    <script src="renderer.js"></script>
+</body>
+
+</html>

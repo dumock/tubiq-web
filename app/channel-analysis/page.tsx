@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import Header from '@/components/Header';
 import FilterBar from '@/components/FilterBar';
 import MetricCard from '@/components/MetricCard';
-import AudienceChart from '@/components/AudienceChart';
+// AudienceChart removed - demographics not available via public API
 import GrowthChart from '@/components/GrowthChart';
 import FolderSidebar from '@/components/FolderSidebar';
 import DraggableAssetCard from '@/components/DraggableAssetCard';
@@ -16,6 +16,7 @@ import AddChannelModal from '@/components/AddChannelModal';
 import { Asset, Folder } from '@/types';
 import { supabase } from '@/lib/supabase';
 import { useFolders } from '@/hooks/useFolders';
+import { useYouTubeApi } from '@/hooks/useYouTubeApi';
 import AssetCard from '@/components/AssetCard';
 import {
     DndContext,
@@ -45,10 +46,12 @@ export default function ChannelAnalysisPage() {
     const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
 
     // Real Data Hooks
+    const { fetchYouTube } = useYouTubeApi();
     const { folders, createFolder, renameFolder, deleteFolder } = useFolders('analysis');
     const [channels, setChannels] = useState<Asset[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
+    const [dailyStats, setDailyStats] = useState<{ date: string; view_count: number; subscriber_count: number; video_count: number }[]>([]);
 
     // Fetch Channels from DB
     const fetchChannels = async () => {
@@ -58,9 +61,7 @@ export default function ChannelAnalysisPage() {
             const token = session?.access_token;
 
             if (token) {
-                const res = await fetch('/api/channel-assets?scope=analysis', {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
+                const res = await fetchYouTube('/api/channel-assets?scope=analysis');
                 const json = await res.json();
                 if (json.ok && Array.isArray(json.data)) {
                     const mappedChannels = json.data.map((row: any) => {
@@ -95,9 +96,39 @@ export default function ChannelAnalysisPage() {
         }
     };
 
+    // Fetch daily stats for active channel
+    const fetchDailyStats = async (channelId: string) => {
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (!session?.access_token) return;
+
+            // Find the internal channel_id from channels table
+            const channel = channels.find(c => c.id === channelId);
+            if (!channel) return;
+
+            const res = await fetch(`/api/channel-stats?channelId=${channelId}`, {
+                headers: { Authorization: `Bearer ${session.access_token}` }
+            });
+            const json = await res.json();
+            if (json.ok && Array.isArray(json.data)) {
+                setDailyStats(json.data);
+            }
+        } catch (error) {
+            console.error('Failed to fetch daily stats:', error);
+        }
+    };
+
     useEffect(() => {
         fetchChannels();
     }, []);
+
+    useEffect(() => {
+        if (selectedChannelId) {
+            fetchDailyStats(selectedChannelId);
+        } else {
+            setDailyStats([]);
+        }
+    }, [selectedChannelId, channels]);
 
     // DnD State
     const [activeId, setActiveId] = useState<string | null>(null);
@@ -315,9 +346,8 @@ export default function ChannelAnalysisPage() {
                 if (!token) return;
 
                 await Promise.all(selectedAssetIds.map(id =>
-                    fetch(`/api/channel-assets?id=${id}`, {
-                        method: 'DELETE',
-                        headers: { 'Authorization': `Bearer ${token}` }
+                    fetchYouTube(`/api/channel-assets?id=${id}`, {
+                        method: 'DELETE'
                     })
                 ));
 
@@ -343,9 +373,8 @@ export default function ChannelAnalysisPage() {
                 const token = session?.access_token;
                 if (!token) return;
 
-                await fetch(`/api/channel-assets?id=${id}`, {
-                    method: 'DELETE',
-                    headers: { 'Authorization': `Bearer ${token}` }
+                await fetchYouTube(`/api/channel-assets?id=${id}`, {
+                    method: 'DELETE'
                 });
 
                 await fetchChannels();
@@ -381,11 +410,10 @@ export default function ChannelAnalysisPage() {
                 scope: 'analysis'
             };
 
-            const res = await fetch('/api/channel-assets', {
+            const res = await fetchYouTube('/api/channel-assets', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify(body)
             });
@@ -484,15 +512,29 @@ export default function ChannelAnalysisPage() {
                                                 icon={Users}
                                                 onClick={() => setIsSubModalOpen(true)}
                                             />
-                                            <MetricCard title="총 조회수" value="85.4M" change={8.2} icon={Eye} />
-                                            <MetricCard title="활성 동영상" value="142" change={5.4} icon={PlaySquare} />
-                                            <MetricCard title="참여율" value="8.5%" change={-2.1} icon={TrendingUp} />
+                                            <MetricCard
+                                                title="총 조회수"
+                                                value={dailyStats[0]?.view_count ? (dailyStats[0].view_count >= 1000000 ? `${(dailyStats[0].view_count / 1000000).toFixed(1)}M` : `${(dailyStats[0].view_count / 1000).toFixed(1)}K`) : "-"}
+                                                change={dailyStats.length >= 2 ? Number(((dailyStats[0]?.view_count - dailyStats[1]?.view_count) / (dailyStats[1]?.view_count || 1) * 100).toFixed(1)) : 0}
+                                                icon={Eye}
+                                            />
+                                            <MetricCard
+                                                title="활성 동영상"
+                                                value={dailyStats[0]?.video_count?.toString() || "-"}
+                                                change={dailyStats.length >= 2 ? (dailyStats[0]?.video_count - dailyStats[1]?.video_count) : 0}
+                                                icon={PlaySquare}
+                                            />
+                                            <MetricCard
+                                                title="일일 조회수"
+                                                value={dailyStats.length >= 2 ? ((dailyStats[0]?.view_count - dailyStats[1]?.view_count) >= 1000 ? `${((dailyStats[0]?.view_count - dailyStats[1]?.view_count) / 1000).toFixed(1)}K` : (dailyStats[0]?.view_count - dailyStats[1]?.view_count).toString()) : "-"}
+                                                change={0}
+                                                icon={TrendingUp}
+                                            />
                                         </div>
 
-                                        {/* Charts Section */}
-                                        <div className="grid gap-6 lg:grid-cols-2">
-                                            <AudienceChart />
-                                            <SimilarChannels />
+                                        {/* Charts Section - Similar Channels Only (Demographics removed) */}
+                                        <div className="grid gap-6 lg:grid-cols-1">
+                                            <SimilarChannels channelId={selectedChannelId || undefined} />
                                         </div>
 
                                         {/* Growth Chart & Daily Table */}
@@ -515,36 +557,31 @@ export default function ChannelAnalysisPage() {
                                                             <tr className="bg-gray-50/30 dark:bg-zinc-800/20 font-bold">
                                                                 <td className="px-6 py-3 text-gray-900 dark:text-white text-base">합계</td>
                                                                 <td className="px-6 py-3 text-indigo-600 text-right text-base dark:text-indigo-400">
-                                                                    {Number(200996547).toLocaleString()}
+                                                                    {dailyStats.length >= 2 ? (dailyStats[0].view_count - dailyStats[dailyStats.length - 1].view_count).toLocaleString() : '-'}
                                                                 </td>
                                                                 <td className="px-6 py-3 text-gray-400 text-right">-</td>
                                                             </tr>
                                                             <tr className="bg-gray-50/10 dark:bg-zinc-800/10 italic">
                                                                 <td className="px-6 py-3 text-gray-500">평균</td>
                                                                 <td className="px-6 py-3 text-gray-600 text-right dark:text-gray-400">
-                                                                    {Number(2233295).toLocaleString()}
+                                                                    {dailyStats.length >= 2 ? Math.floor((dailyStats[0].view_count - dailyStats[dailyStats.length - 1].view_count) / dailyStats.length).toLocaleString() : '-'}
                                                                 </td>
                                                                 <td className="px-6 py-3 text-gray-400 text-right">-</td>
                                                             </tr>
 
-                                                            {/* Data Rows (Mock 90 days) */}
-                                                            {Array.from({ length: 90 }).map((_, i) => {
-                                                                const date = new Date();
-                                                                date.setDate(date.getDate() - i);
-                                                                const dateStr = date.toISOString().split('T')[0].replace(/-/g, '.');
-                                                                const dailyViews = Math.floor(Math.random() * 3000000) + 500000;
-                                                                const cumulative = 2500000000 - (i * 2000000); // Inverse mock for list
-
+                                                            {/* Data Rows from channel_daily_stats */}
+                                                            {dailyStats.map((stat, i) => {
+                                                                const dailyViews = i < dailyStats.length - 1 ? stat.view_count - dailyStats[i + 1].view_count : 0;
                                                                 return (
-                                                                    <tr key={i} className="hover:bg-gray-50/50 dark:hover:bg-zinc-800/30 transition-colors">
+                                                                    <tr key={stat.date} className="hover:bg-gray-50/50 dark:hover:bg-zinc-800/30 transition-colors">
                                                                         <td className="px-6 py-3 text-gray-600 dark:text-gray-400 font-mono text-xs">
-                                                                            {dateStr}
+                                                                            {stat.date.replace(/-/g, '.')}
                                                                         </td>
                                                                         <td className="px-6 py-3 text-gray-900 text-right dark:text-gray-100 font-medium">
                                                                             {dailyViews.toLocaleString()}
                                                                         </td>
                                                                         <td className="px-6 py-3 text-gray-500 text-right dark:text-gray-500">
-                                                                            {cumulative.toLocaleString()}
+                                                                            {stat.view_count.toLocaleString()}
                                                                         </td>
                                                                     </tr>
                                                                 );

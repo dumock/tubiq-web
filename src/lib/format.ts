@@ -6,7 +6,9 @@ export function formatCompactNumber(number: number): string {
 }
 
 export function formatDate(dateString: string): string {
+    if (!dateString) return '-';
     const date = new Date(dateString);
+    if (isNaN(date.getTime())) return '-';
     return new Intl.DateTimeFormat('ko-KR', {
         year: 'numeric',
         month: 'numeric',

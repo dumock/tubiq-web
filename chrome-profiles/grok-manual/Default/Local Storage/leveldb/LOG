@@ -1,0 +1,8 @@
+2026/01/13-03:18:15.370 605c Reusing MANIFEST C:\tubiq-web\chrome-profiles\grok-manual\Default\Local Storage\leveldb/MANIFEST-000001
+2026/01/13-03:18:15.382 605c Recovering log #805
+2026/01/13-03:18:15.383 605c Level-0 table #808: started
+2026/01/13-03:18:15.390 605c Level-0 table #808: 55531 bytes OK
+2026/01/13-03:18:15.396 605c Delete type=0 #805
+2026/01/13-03:19:15.403 7798 Level-0 table #811: started
+2026/01/13-03:19:15.408 7798 Level-0 table #811: 54864 bytes OK
+2026/01/13-03:19:15.409 7798 Delete type=0 #809

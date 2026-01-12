@@ -1,14 +1,22 @@
 import { NextResponse } from 'next/server';
-import { getYoutubeApiKey } from '@/lib/api-keys-server';
+import { getYoutubeApiKey, getTikHubApiKey } from '@/lib/api-keys-server';
 
 export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const input = searchParams.get('input');
     const apiKey = await getYoutubeApiKey(request);
 
-    // If it's a Douyin URL, we don't need a YouTube API key
-    if (input && input.includes('douyin.com')) {
-        // Pass through, will be handled by Douyin logic below
+    // If it's a non-YouTube platform URL, we don't need a YouTube API key
+    const isNonYouTubePlatform = input && (
+        input.includes('douyin.com') ||
+        input.includes('tiktok.com') ||
+        input.includes('instagram.com') ||
+        input.includes('xiaohongshu.com') ||
+        input.includes('xhslink.com')
+    );
+
+    if (isNonYouTubePlatform) {
+        // Pass through, will be handled by platform-specific logic below
     } else if (!apiKey) {
         return NextResponse.json(
             { ok: false, message: 'missing api key' },
@@ -83,13 +91,139 @@ export async function GET(request: Request) {
     }
 
 
-    // Douyin Channel Resolution
+    // TikHub API for TikTok, Instagram, Xiaohongshu
+    const isTikTok = trimmedInput.includes('tiktok.com');
+    const isInstagram = trimmedInput.includes('instagram.com');
+    const isXiaohongshu = trimmedInput.includes('xiaohongshu.com') || trimmedInput.includes('xhslink.com');
+
+    if (isTikTok || isInstagram || isXiaohongshu) {
+        try {
+            const tikHubApiKey = await getTikHubApiKey(request);
+            if (!tikHubApiKey) {
+                return NextResponse.json(
+                    { ok: false, message: 'TikHub API key not configured' },
+                    { status: 500 }
+                );
+            }
+
+            let platform = 'tiktok';
+            let username = '';
+            let apiEndpoint = '';
+
+            // Extract username from URL
+            if (isTikTok) {
+                platform = 'tiktok';
+                const match = trimmedInput.match(/tiktok\.com\/@([\w._]+)/);
+                username = match ? match[1] : '';
+                apiEndpoint = `https://api.tikhub.io/api/v1/tiktok/web/get_user_profile?uniqueId=${username}`;
+            } else if (isInstagram) {
+                platform = 'instagram';
+                const match = trimmedInput.match(/instagram\.com\/([\w._]+)/);
+                username = match ? match[1] : '';
+                apiEndpoint = `https://api.tikhub.io/api/v1/instagram/web/get_user_info?username=${username}`;
+            } else if (isXiaohongshu) {
+                platform = 'xiaohongshu';
+                // Xiaohongshu URL format: https://www.xiaohongshu.com/user/profile/xxx
+                const match = trimmedInput.match(/user\/profile\/([\w]+)/) || trimmedInput.match(/xhslink\.com\/([a-zA-Z0-9]+)/);
+                username = match ? match[1] : '';
+                apiEndpoint = `https://api.tikhub.io/api/v1/xiaohongshu/web/get_user_info?user_id=${username}`;
+            }
+
+            if (!username) {
+                return NextResponse.json(
+                    { ok: false, message: 'Could not extract username from URL' },
+                    { status: 400 }
+                );
+            }
+
+            console.log(`[API] Resolving ${platform} channel via TikHub API for username: ${username}`);
+
+            const tikHubRes = await fetch(apiEndpoint, {
+                headers: {
+                    'Authorization': `Bearer ${tikHubApiKey}`,
+                    'Accept': 'application/json'
+                },
+                signal: AbortSignal.timeout(15000)
+            });
+
+            if (!tikHubRes.ok) {
+                const errorText = await tikHubRes.text();
+                console.error(`TikHub API Error (${tikHubRes.status}):`, errorText);
+                return NextResponse.json(
+                    { ok: false, message: `TikHub API error: ${tikHubRes.status}` },
+                    { status: tikHubRes.status }
+                );
+            }
+
+            const tikHubData = await tikHubRes.json();
+            console.log(`[API] TikHub response for ${username}:`, JSON.stringify(tikHubData).slice(0, 500));
+
+            // Parse response based on platform
+            let channelInfo;
+            if (isTikTok) {
+                const userInfo = tikHubData?.data?.userInfo || tikHubData?.userInfo || {};
+                const user = userInfo?.user || tikHubData?.data?.user || {};
+                const stats = userInfo?.stats || tikHubData?.data?.stats || {};
+                channelInfo = {
+                    id: user.uniqueId || user.id || username,
+                    title: user.nickname || user.uniqueId || username,
+                    handle: `@${user.uniqueId || username}`,
+                    thumbnailUrl: user.avatarLarger || user.avatarMedium || user.avatarThumb || '',
+                    subscriberCount: stats.followerCount || stats.followers || 0,
+                    videoCount: stats.videoCount || 0,
+                    publishedAt: null,
+                    platform: 'tiktok'
+                };
+            } else if (isInstagram) {
+                const user = tikHubData?.data?.user || tikHubData?.user || tikHubData?.data || {};
+                channelInfo = {
+                    id: user.id || user.pk || username,
+                    title: user.full_name || user.username || username,
+                    handle: `@${user.username || username}`,
+                    thumbnailUrl: user.profile_pic_url_hd || user.profile_pic_url || '',
+                    subscriberCount: user.follower_count || user.edge_followed_by?.count || 0,
+                    videoCount: user.media_count || user.edge_owner_to_timeline_media?.count || 0,
+                    publishedAt: null,
+                    platform: 'instagram'
+                };
+            } else if (isXiaohongshu) {
+                const user = tikHubData?.data?.basic_info || tikHubData?.data || {};
+                channelInfo = {
+                    id: user.red_id || user.user_id || username,
+                    title: user.nickname || user.name || username,
+                    handle: `@${user.red_id || username}`,
+                    thumbnailUrl: user.images || user.avatar || '',
+                    subscriberCount: user.fans || tikHubData?.data?.interactions?.find((i: any) => i.type === 'fans')?.count || 0,
+                    videoCount: tikHubData?.data?.interactions?.find((i: any) => i.type === 'notes')?.count || 0,
+                    publishedAt: null,
+                    platform: 'xiaohongshu'
+                };
+            }
+
+            if (!channelInfo || !channelInfo.id) {
+                return NextResponse.json(
+                    { ok: false, message: 'Could not parse user info from TikHub response' },
+                    { status: 404 }
+                );
+            }
+
+            return NextResponse.json({ ok: true, channel: channelInfo });
+
+        } catch (error) {
+            console.error('TikHub API Error:', error);
+            return NextResponse.json(
+                { ok: false, message: 'TikHub API request failed' },
+                { status: 500 }
+            );
+        }
+    }
+
+    // Douyin Channel Resolution (keep using local worker)
     if (trimmedInput.includes('douyin.com')) {
         try {
-            const workerUrl = 'https://port-0-douyin-worker-mjk7tb329db087f3.sel3.cloudtype.app';
-            console.log(`[API] Resolving Douyin channel for ${trimmedInput}`);
+            const workerUrl = process.env.DOUYIN_WORKER_URL || 'http://127.0.0.1:8000';
+            console.log(`[API] Resolving Douyin channel via ${workerUrl} for ${trimmedInput}`);
 
-            // We use /api/info because it returns author info even for video links
             const workerRes = await fetch(`${workerUrl}/api/info?url=${encodeURIComponent(trimmedInput)}`, {
                 signal: AbortSignal.timeout(15000)
             });
@@ -109,17 +243,15 @@ export async function GET(request: Request) {
                 );
             }
 
-            // Map Douyin data to ChannelData format
             const channelInfo = {
-                id: data.author_id, // unique_id or sec_uid
+                id: data.author_id,
                 title: data.author || 'Douyin User',
                 handle: `@${data.author_id}`,
-                thumbnailUrl: data.author_avatar || data.thumbnail_url, // Fallback to video thumb if avatar missing (worker needs to return avatar)
-                subscriberCount: 0, // Not available in simple info
-                viewCount: 0,
+                thumbnailUrl: data.author_avatar || data.thumbnail_url,
+                subscriberCount: data.follower_count || 0,
                 videoCount: 0,
                 publishedAt: null,
-                platform: 'douyin' // Add platform field for frontend to distinguish
+                platform: 'douyin'
             };
 
             return NextResponse.json({ ok: true, channel: channelInfo });

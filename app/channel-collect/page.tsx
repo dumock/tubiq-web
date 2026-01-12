@@ -17,6 +17,7 @@ import {
     ArrowUpRight,
 } from 'lucide-react';
 import Link from 'next/link';
+import { useYouTubeApi } from '@/hooks/useYouTubeApi';
 import { calculateGoodChannelScore } from '@/lib/goodChannelScore';
 
 interface CollectedChannel {
@@ -43,6 +44,7 @@ const formatNumber = (num: number) => {
 };
 
 export default function ChannelCollectPage() {
+    const { apiFetch } = useYouTubeApi();
     const [channels, setChannels] = useState<CollectedChannel[]>([]);
     const [summary, setSummary] = useState({
         totalChannels: 0,
@@ -71,8 +73,8 @@ export default function ChannelCollectPage() {
     const fetchMetadata = async () => {
         try {
             const [summaryRes, jobRes] = await Promise.all([
-                fetch('/api/collector/summary'),
-                fetch('/api/collector/job/latest')
+                apiFetch('/api/collector/summary'),
+                apiFetch('/api/collector/job/latest')
             ]);
             const summaryData = await summaryRes.json();
             const jobData = await jobRes.json();
@@ -97,7 +99,7 @@ export default function ChannelCollectPage() {
                 sortOrder: sortConfig.direction
             });
 
-            const res = await fetch(`/api/collector/channels?${params}`);
+            const res = await apiFetch(`/api/collector/channels?${params}`);
             const data = await res.json();
 
             if (data.ok) {

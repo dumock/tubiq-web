@@ -5,7 +5,12 @@
 		},
 		{
 			"path": "."
+		},
+		{
+			"path": "../Android/Projects/TubiqSharer"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"git.ignoreLimitWarning": true
+	}
 }
