@@ -204,6 +204,15 @@ export default function SubtitleMakerPage() {
                     setSubtitles(parsed.subtitles);
                 }
 
+                // IMPORTANT: Prevent default initialization from overwriting our clips
+                hasInitializedClips.current = true;
+
+                // Set initial duration from clips if available
+                if (parsed.videoClips && parsed.videoClips.length > 0) {
+                    const maxTime = Math.max(...parsed.videoClips.map((c: any) => c.endTime || 0));
+                    if (maxTime > 0) setDuration(maxTime);
+                }
+
                 // CONSUME the data so it doesn't overwrite manual edits on reload
                 localStorage.removeItem('tubiq-edit-project');
                 return;
