@@ -942,8 +942,10 @@ export default function StoryboardPage() {
             src: s.videoUrl!,
             type: 'video',
             name: `Scene ${index + 1}`,
-            startOffset: index * 4, // Default 4s duration per clip
-            duration: 4,
+            startTime: index * 4, // Corrected from startOffset
+            endTime: (index * 4) + 4, // Corrected from duration
+            sourceStart: 0,       // Added
+            sourceEnd: 4,         // Added
             layer: 0,
             trackId: 'main-track'
         }));
@@ -952,8 +954,8 @@ export default function StoryboardPage() {
         const subtitles = videoScenes.map((s, index) => ({
             id: crypto.randomUUID(),
             text: s.script,
-            start: index * 4,
-            end: (index * 4) + 4
+            startTime: index * 4,      // Corrected from start
+            endTime: (index * 4) + 4   // Corrected from end
         }));
 
         // 4. Save to LocalStorage
