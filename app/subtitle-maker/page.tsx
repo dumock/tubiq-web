@@ -159,10 +159,10 @@ export default function SubtitleMakerPage() {
         togglePlay,
         seek
     } = useTimelineEngine({
-        videoRef: { current: null }, // Disable hook's internal sync; let page layout handle it
+        videoRef: primaryRefB, // Connect to actual video element
         videoClips,
         duration,
-        onTimeUpdate: (time) => { /* Optional side effects */ }
+        onTimeUpdate: (time) => { /* Optional */ }
     });
 
     const setCurrentTime = (timeOrFn: number | ((prev: number) => number)) => {
@@ -596,12 +596,20 @@ export default function SubtitleMakerPage() {
                 sourceStart: 0,
                 sourceEnd: duration,
                 layer: 0,
-                assetId: 'main'
+                assetId: 'main',
+                src: videoUrl
             }]);
             if (!assets['main']) setAssets(prev => ({ ...prev, 'main': videoUrl }));
             hasInitializedClips.current = true;
         }
     }, [duration, videoUrl]);
+
+    // Set initial src for primaryRefB
+    useEffect(() => {
+        if (videoUrl && primaryRefB.current) {
+            primaryRefB.current.src = videoUrl;
+        }
+    }, [videoUrl]);
 
     // Dynamic Active Layers
     const activeLayers = useMemo(() => {
@@ -1982,9 +1990,9 @@ export default function SubtitleMakerPage() {
                                                 />
                                                 <video
                                                     ref={primaryRefB}
-                                                    src={videoUrl || ''}
+                                                    // src controlled by useTimelineEngine
                                                     className="absolute inset-0 w-full h-full object-cover transition-opacity duration-75"
-                                                    style={{ zIndex: 1, opacity: 0 }}
+                                                    style={{ zIndex: 1, opacity: 1 }}
                                                     preload="auto"
                                                     muted={true}
                                                 />

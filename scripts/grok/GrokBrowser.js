@@ -24,6 +24,7 @@ class GrokBrowser {
         this.page = null;
         this.profileId = profileId;
         this.profilePath = path.join(PROFILES_DIR, profileId);
+        this.downloadPath = path.resolve(process.cwd(), 'tmp', 'downloads');
     }
 
     /**

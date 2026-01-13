@@ -40,12 +40,30 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
                 // --- SEQUENCING LOGIC ---
                 const video = videoRef.current;
                 if (video) {
-                    // 1. Find which clip we are in
+                    // 1. Find which clip we are in (Layer 0 priority)
                     const activeClip = videoClips.find(clip =>
-                        newTime >= clip.startTime && newTime < clip.endTime
+                        newTime >= clip.startTime &&
+                        newTime < clip.endTime &&
+                        (clip.layer === 0 || clip.layer === undefined)
                     );
 
                     if (activeClip) {
+                        // 1.5 CHECK SOURCE
+                        // Dynamic Source Switching: If src changed, load new source
+                        if (activeClip.src && video.src !== activeClip.src) {
+                            // Only switch if different (avoid reload loops)
+                            // Check if current src is relative or different
+                            const currentSrc = video.currentSrc || video.src;
+                            // Need loose check or exact check.
+                            if (!currentSrc.endsWith(activeClip.src) && currentSrc !== activeClip.src) {
+                                console.log('[Engine] Switching Source:', activeClip.src);
+                                video.src = activeClip.src;
+                                // After changing src, we MUST wait for metadata or just seek?
+                                // Usually setting src resets everything.
+                                // We rely on the seek logic below to set time.
+                            }
+                        }
+
                         // 2. Calculate where the video SHOULD be
                         // offset = (Current Master Time - Clip Start Time)
                         // Target Video Time = Clip Source Start + offset
@@ -55,17 +73,21 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
                         // 3. Check drift / cut
                         // If the video is paused or far away, seek it.
                         // Optimization: Tolerance of ~0.1s (approx 3 frames at 30fps)
-                        if (Math.abs(video.currentTime - targetVideoTime) > 0.15) {
-                            video.currentTime = targetVideoTime;
+                        // Also check if we just switched source (readyState might be 0)
+                        if (Math.abs(video.currentTime - targetVideoTime) > 0.15 || video.readyState < 2) {
+                            // Safe seek
+                            try {
+                                video.currentTime = targetVideoTime;
+                            } catch (e) { /* ignore seek before ready */ }
 
                             // If video was paused (gap or just started), play it
-                            if (video.paused) {
+                            if (video.paused && video.readyState >= 3) {
                                 video.play().catch(e => console.warn("Auto-play blocked", e));
                             }
                         } else {
                             // If we are "close enough", we trust the video playback speed 
                             // BUT we must ensure it IS playing.
-                            if (video.paused) {
+                            if (video.paused && video.readyState >= 3) {
                                 video.play().catch(() => { });
                             }
                             // Speed Match (optional): video.playbackRate = 1.0;

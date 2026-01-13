@@ -115,7 +115,7 @@ class GrokBrowserProvider extends BaseProvider {
             }
 
             // 8. 결과 대기
-            const result = await actions.waitForVideo(page);
+            const result = await actions.waitForVideo(page, this.browser.downloadPath);
 
             return result;
 

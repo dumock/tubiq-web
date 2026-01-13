@@ -41,7 +41,6 @@ async function clickButton(page, buttonConfig) {
     console.error('[Actions] Clicking button...');
 
     // 1. 정확한 셀렉터로 먼저 시도
-    // 1. 정확한 셀렉터로 먼저 시도
     if (buttonConfig.selectors) {
         for (const selector of buttonConfig.selectors) {
             const clicked = await page.evaluate((sel, config) => {
@@ -436,6 +435,7 @@ async function switchToImageMode(page) {
 
     return true;
 }
+
 /**
  * 이미지 업로드 (Hidden Input 직접 업로드)
  */
@@ -636,8 +636,13 @@ async function waitForImages(page, timeoutMs = 180000) {
 /**
  * 비디오 생성 완료 대기 및 다운로드
  */
-async function waitForVideo(page, timeoutMs = 180000) {
-    console.error('[Actions] Waiting for video...');
+async function waitForVideo(page, downloadPath, timeoutMs = 240000) {
+    if (typeof downloadPath === 'number') {
+        timeoutMs = downloadPath;
+        downloadPath = null;
+    }
+
+    console.error(`[Actions] Waiting for video... (Timeout: ${timeoutMs}ms, Path: ${downloadPath})`);
 
     const startTime = Date.now();
     let capturedBuffer = null;
@@ -650,8 +655,8 @@ async function waitForVideo(page, timeoutMs = 180000) {
         if (contentType.includes('video/') || url.includes('.mp4')) {
             try {
                 const buffer = await response.buffer();
-                if (buffer.length > 2 * 1024 * 1024) { // 2MB 이상
-                    console.error(`[Actions] Captured video: ${buffer.length} bytes`);
+                if (buffer.length > 500 * 1024) { // 500KB Check
+                    console.error(`[Actions] Captured video via network: ${buffer.length} bytes`);
                     capturedBuffer = buffer;
                 }
             } catch (e) { }
@@ -664,7 +669,7 @@ async function waitForVideo(page, timeoutMs = 180000) {
         while (Date.now() - startTime < timeoutMs) {
             await delay(2000);
 
-            // 0. 검색 모달이 열렸으면 닫기
+            // 0. Clean Search Modal
             const hasSearchModal = await page.evaluate(() => {
                 const modal = document.querySelector('div[role="dialog"]');
                 if (modal) {
@@ -683,7 +688,7 @@ async function waitForVideo(page, timeoutMs = 180000) {
                 continue;
             }
 
-            // 1. Skip 버튼 처리
+            // 1. Skip Button
             const hasSkip = await page.evaluate((cfg) => {
                 const bodyText = document.body.innerText;
                 if (bodyText.includes('Which video do you prefer')) {
@@ -691,7 +696,7 @@ async function waitForVideo(page, timeoutMs = 180000) {
                     const skipBtn = buttons.find(b => {
                         const t = b.innerText.trim().toLowerCase();
                         const rect = b.getBoundingClientRect();
-                        if (rect.left < 500) return false; // 사이드바 제외
+                        if (rect.left < 500) return false;
                         return cfg.textMatch.some(m => t === m.toLowerCase());
                     });
                     if (skipBtn) {
@@ -700,44 +705,72 @@ async function waitForVideo(page, timeoutMs = 180000) {
                     }
                 }
                 return false;
-            }, SELECTORS.SKIP_BTN);
+            }, { textMatch: ['skip', 'pass', 'next', '건너뛰기'] });
 
             if (hasSkip) {
-                console.error('[Actions] Clicked Skip button');
+                console.log('[Actions] Clicked Skip button');
+                await delay(2000); // Wait for transition
                 continue;
             }
 
-            // 2. 영상 생성 중인지 확인 (Generating 텍스트가 있으면 대기)
+            // 2. Generating Check
             const isStillGenerating = await page.evaluate(() => {
-                const bodyText = document.body.innerText.toLowerCase();
-                return bodyText.includes('generating') ||
-                    bodyText.includes('생성 중') ||
-                    bodyText.includes('processing');
+                const bodyText = document.body.innerText;
+                return bodyText.includes('Generating video') ||
+                    bodyText.includes('비디오 생성 중') ||
+                    !!document.querySelector('.animate-pulse');
             });
 
             if (isStillGenerating) {
-                const elapsed = Math.round((Date.now() - startTime) / 1000);
-                console.log(`[Actions] Video still generating... (${elapsed}s elapsed)`);
-                continue; // 아직 생성 중이면 다운로드 시도 안 함
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                if (elapsed % 10 === 0) {
+                    console.log(`[Actions] Video still generating... (${elapsed}s elapsed)`);
+                }
+                continue;
             }
 
-            // 3. 다운로드 버튼 찾기
-            // 이미 다운로드 클릭했으면 대기만 함 (스팸 방지)
+            // 3. Click Video to Open Modal (High Res)
+            const hasModal = await page.evaluate(() => !!document.querySelector('div[role="dialog"]'));
+
+            if (!hasModal) {
+                const clickedVideo = await page.evaluate(() => {
+                    const videos = Array.from(document.querySelectorAll('video'));
+                    if (videos.length === 0) return false;
+
+                    const lastVideo = videos[videos.length - 1];
+                    const rect = lastVideo.getBoundingClientRect();
+
+                    if (rect.width > 0 && rect.height > 0) {
+                        lastVideo.click(); // Click to open modal
+                        return true;
+                    }
+                    const parent = lastVideo.parentElement;
+                    if (parent) {
+                        parent.click();
+                        return true;
+                    }
+                    return false;
+                });
+
+                if (clickedVideo) {
+                    console.log('[Actions] Clicked video to open high-res modal');
+                    await delay(3000); // Wait for modal animation
+                }
+            }
+
+            // 4. Find Download Button (Prioritize Modal)
             const downloadResult = await page.evaluate(() => {
-                // 방법 1: lucide-download SVG 직접 찾기
                 const allButtons = Array.from(document.querySelectorAll('button'));
 
-                for (const btn of allButtons) {
-                    const rect = btn.getBoundingClientRect();
+                const modal = document.querySelector('div[role="dialog"]');
+                const buttonsToCheck = modal ? Array.from(modal.querySelectorAll('button')) : allButtons;
 
-                    // 사이드바 제외 (x < 500)
-                    if (rect.left < 500) continue;
+                for (const btn of buttonsToCheck) {
+                    const rect = btn.getBoundingClientRect();
                     if (rect.width <= 0 || rect.height <= 0) continue;
 
-                    // 사이드바 요소 제외
-                    if (btn.closest('nav') || btn.closest('aside')) continue;
+                    if (!modal && (btn.closest('nav') || btn.closest('aside'))) continue; // Ignore sidebar if no modal
 
-                    // SVG 확인
                     const svg = btn.querySelector('svg');
                     let isDownload = false;
 
@@ -748,7 +781,6 @@ async function waitForVideo(page, timeoutMs = 180000) {
                         }
                     }
 
-                    // aria-label 확인
                     const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
                     if (ariaLabel.includes('download') && !ariaLabel.includes('search')) {
                         isDownload = true;
@@ -764,24 +796,52 @@ async function waitForVideo(page, timeoutMs = 180000) {
             });
 
             if (downloadResult.clicked) {
-                console.error(`[Actions] Download button clicked. Waiting for file capture...`);
-                // 클릭 후 충분히 대기 (5초 -> 10초)
-                // 만약 10초 내에 캡처 안되면 다시 루프 돌면서 재클릭 시도
-                const captureStart = Date.now();
-                while (Date.now() - captureStart < 10000) {
-                    if (capturedBuffer) {
+                console.error(`[Actions] Download button clicked. Waiting for file...`);
+
+                const waitStart = Date.now();
+                let downloadedFile = null;
+
+                while (Date.now() - waitStart < 15000) {
+                    // A. Check Disk
+                    if (downloadPath) {
+                        try {
+                            const files = fs.readdirSync(downloadPath);
+                            const recentFile = files
+                                .filter(f => f.endsWith('.mp4') || f.endsWith('.webm'))
+                                .map(f => ({ name: f, stat: fs.statSync(path.join(downloadPath, f)) }))
+                                .filter(f => Date.now() - f.stat.mtimeMs < 20000) // 20s window
+                                .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs)[0];
+
+                            if (recentFile && recentFile.stat.size > 500 * 1024) { // > 500KB
+                                downloadedFile = path.join(downloadPath, recentFile.name);
+                                break;
+                            }
+                        } catch (e) { }
+                    }
+
+                    // B. Check Network Buffer
+                    if (capturedBuffer && capturedBuffer.length > 500 * 1024) {
                         break;
                     }
-                    await delay(500);
+
+                    await delay(1000);
                 }
 
-                if (capturedBuffer) {
+                // Cleanup Modal
+                try {
+                    await page.keyboard.press('Escape');
+                } catch (e) { }
+
+                if (downloadedFile) {
+                    console.error(`[Actions] Found downloaded file on disk: ${downloadedFile}`);
+                    return { success: true, videoPath: downloadedFile };
+                }
+
+                if (capturedBuffer && capturedBuffer.length > 500 * 1024) {
                     const tmpPath = path.join(process.cwd(), 'tmp', `grok_video_${Date.now()}.mp4`);
                     fs.writeFileSync(tmpPath, capturedBuffer);
-                    console.error(`[Actions] Video saved: ${tmpPath}`);
+                    console.error(`[Actions] Video saved from network: ${tmpPath}`);
                     return { success: true, videoPath: tmpPath };
-                } else {
-                    console.error(`[Actions] No file captured yet, might retry...`);
                 }
             }
         }

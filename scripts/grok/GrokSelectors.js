@@ -86,6 +86,12 @@ module.exports = {
         excludeSrc: ['avatar', 'profile', 'icon', 'logo']
     },
 
+    GENERATED_VIDEO_CARD: {
+        selector: 'video',
+        containerSelector: 'div.group',
+        minDuration: 1
+    },
+
     // === 파일 업로드 ===
     FILE_INPUT: 'input[type="file"]',
 

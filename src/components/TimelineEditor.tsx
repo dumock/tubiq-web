@@ -17,6 +17,9 @@ export interface VideoClip {
     sourceEnd: number;
     layer?: number; // 0 = Main, 1 = Overlay
     hasAudio?: boolean; // true by default, false when audio is unlinked
+    src?: string;
+    name?: string;
+    type?: string;
 }
 
 export interface AudioClip {
@@ -323,46 +326,19 @@ export default function TimelineEditor({
     // Total timeline width
     const totalWidth = Math.max((duration + 5) * pxPerSec, window.innerWidth);
 
-    // Frame Extraction Logic
+    // Multi-clip Frame Extraction
     const generateFrameThumbnails = useCallback(async () => {
-        if (!videoElement || isGeneratingFrames) return;
+        if (!videoElement || isGeneratingFrames || videoClips.length === 0) return;
 
         setIsGeneratingFrames(true);
         onFrameExtractionChange?.(true);
 
-        const extractionVideo = document.createElement('video');
-        extractionVideo.src = videoElement.src;
-        extractionVideo.crossOrigin = 'anonymous';
-        extractionVideo.muted = true;
-
-        try {
-            await new Promise<void>((resolve, reject) => {
-                extractionVideo.onloadedmetadata = () => resolve();
-                extractionVideo.onerror = () => reject(new Error('Failed to load video'));
-                extractionVideo.load();
-            });
-        } catch (e) {
-            console.error('[Frame Extraction] Failed to create extraction video:', e);
-            setIsGeneratingFrames(false);
-            onFrameExtractionChange?.(false);
-            return;
-        }
-
-        const thumbnails: string[] = [];
-        // Prioritize existing video element dimensions if available
-        const videoW = videoElement.videoWidth || extractionVideo.videoWidth;
-        const videoH = videoElement.videoHeight || extractionVideo.videoHeight;
-        const aspectRatio = (videoW && videoH) ? (videoW / videoH) : (16 / 9);
-
-        setThumbnailAspectRatio(aspectRatio);
-
-        // High resolution for clear thumbnails
         const canvasHeight = 480;
-        const canvasWidth = Math.round(canvasHeight * aspectRatio);
+        const canvasWidth = Math.round(canvasHeight * (16 / 9));
         const canvas = document.createElement('canvas');
         canvas.width = canvasWidth;
         canvas.height = canvasHeight;
-        const ctx = canvas.getContext('2d', { alpha: false }); // Optimize for no alpha
+        const ctx = canvas.getContext('2d', { alpha: false });
 
         if (!ctx) {
             setIsGeneratingFrames(false);
@@ -370,33 +346,81 @@ export default function TimelineEditor({
             return;
         }
 
-        // Draw black background first
-        ctx.fillStyle = '#000000';
-
+        const thumbnails: string[] = [];
         const maxFrames = Math.min(Math.ceil(duration), 30);
         const interval = duration / maxFrames;
 
+        // Helper to load video source
+        const loadSource = async (src: string, videoEl: HTMLVideoElement): Promise<void> => {
+            return new Promise((resolve, reject) => {
+                const isRemote = src.startsWith('http');
+                videoEl.src = isRemote ? `/api/proxy-video?url=${encodeURIComponent(src)}` : src;
+                videoEl.crossOrigin = 'anonymous';
+                videoEl.muted = true;
+
+                videoEl.onloadedmetadata = () => resolve();
+                videoEl.onerror = () => reject();
+                videoEl.load();
+            });
+        };
+
+        const extractionVideo = document.createElement('video');
+
+        // Sort clips by startTime (Layer 0)
+        const sortedClips = [...videoClips]
+            .filter(c => c.layer === 0 || c.layer === undefined)
+            .sort((a, b) => a.startTime - b.startTime);
+
         for (let time = 0; time <= duration; time += interval) {
-            try {
-                await new Promise<void>((resolve) => {
-                    const seekHandler = () => {
-                        ctx.fillRect(0, 0, canvas.width, canvas.height); // Clear
-                        ctx.drawImage(extractionVideo, 0, 0, canvas.width, canvas.height);
-                        thumbnails.push(canvas.toDataURL('image/jpeg', 0.9)); // High quality JPEG
-                        extractionVideo.removeEventListener('seeked', seekHandler);
-                        resolve();
-                    };
-                    extractionVideo.addEventListener('seeked', seekHandler);
-                    extractionVideo.currentTime = time;
-                });
-            } catch (e) { }
+            // Find which clip covers this time
+            const activeClip = sortedClips.find(c => time >= c.startTime && time < c.endTime);
+
+            if (activeClip && activeClip.src) {
+                try {
+                    // Check if we need to load new source
+                    // (Simple check: if current src doesn't match needed src)
+                    // Note: proxy URL makes direct string comparison hard, so we track 'currentRealSrc' manually or just reload if needed.
+                    // For simplicity in this loop, we can just load for every frame or optimize. 
+                    // Optimization: Track loaded src.
+
+                    // But extractionVideo.src will be the proxy URL.
+                    // Let's just blindly load if it seems different or simpler: compare against lastLoadedSrc?
+                    // Implementation detail: we need to seek within the clip.
+
+                    await loadSource(activeClip.src, extractionVideo);
+
+                    const offset = time - activeClip.startTime;
+                    const targetTime = activeClip.sourceStart + offset;
+
+                    await new Promise<void>(resolve => {
+                        const seekHandler = () => {
+                            ctx.drawImage(extractionVideo, 0, 0, canvas.width, canvas.height);
+                            extractionVideo.removeEventListener('seeked', seekHandler);
+                            resolve();
+                        };
+                        extractionVideo.addEventListener('seeked', seekHandler);
+                        extractionVideo.currentTime = targetTime;
+                    });
+
+                    thumbnails.push(canvas.toDataURL('image/jpeg', 0.8));
+                } catch (e) {
+                    // Fallback black
+                    ctx.fillStyle = '#000000';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    thumbnails.push(canvas.toDataURL('image/jpeg', 0.8));
+                }
+            } else {
+                // Gap -> Black
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                thumbnails.push(canvas.toDataURL('image/jpeg', 0.8));
+            }
         }
 
-        extractionVideo.src = '';
         setFrameThumbnails(thumbnails);
         setIsGeneratingFrames(false);
         onFrameExtractionChange?.(false);
-    }, [videoElement, duration, onFrameExtractionChange]);
+    }, [videoElement, duration, videoClips, onFrameExtractionChange]);
 
     useEffect(() => {
         if (videoElement && duration > 0 && frameThumbnails.length === 0) {

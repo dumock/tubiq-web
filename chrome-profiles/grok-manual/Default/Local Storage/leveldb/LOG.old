@@ -1,3 +1,27 @@
-2026/01/13-03:16:34.307 5b3c Reusing MANIFEST C:\tubiq-web\chrome-profiles\grok-manual\Default\Local Storage\leveldb/MANIFEST-000001
-2026/01/13-03:16:34.313 5b3c Recovering log #805
-2026/01/13-03:16:34.320 5b3c Reusing old log C:\tubiq-web\chrome-profiles\grok-manual\Default\Local Storage\leveldb/000805.log 
+2026/01/14-03:33:23.144 2784 Reusing MANIFEST C:\tubiq-web\chrome-profiles\grok-manual\Default\Local Storage\leveldb/MANIFEST-000001
+2026/01/14-03:33:23.151 2784 Recovering log #990
+2026/01/14-03:33:23.156 2784 Reusing old log C:\tubiq-web\chrome-profiles\grok-manual\Default\Local Storage\leveldb/000990.log 
+2026/01/14-03:34:23.179 2178 Level-0 table #994: started
+2026/01/14-03:34:23.186 2178 Level-0 table #994: 55774 bytes OK
+2026/01/14-03:34:23.187 2178 Delete type=0 #990
+2026/01/14-03:35:24.487 2178 Level-0 table #996: started
+2026/01/14-03:35:24.493 2178 Level-0 table #996: 54794 bytes OK
+2026/01/14-03:35:24.494 2178 Delete type=0 #993
+2026/01/14-03:36:24.487 2178 Level-0 table #998: started
+2026/01/14-03:36:24.491 2178 Level-0 table #998: 53936 bytes OK
+2026/01/14-03:36:24.492 2178 Delete type=0 #995
+2026/01/14-03:36:24.492 2178 Compacting 4@0 + 1@1 files
+2026/01/14-03:36:24.502 2178 Generated table #999@0: 16733 keys, 276077 bytes
+2026/01/14-03:36:24.502 2178 Compacted 4@0 + 1@1 files => 276077 bytes
+2026/01/14-03:36:24.503 2178 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/01/14-03:36:24.504 2178 Delete type=2 #989
+2026/01/14-03:36:24.504 2178 Delete type=2 #991
+2026/01/14-03:36:24.504 2178 Delete type=2 #994
+2026/01/14-03:36:24.504 2178 Delete type=2 #996
+2026/01/14-03:36:24.504 2178 Delete type=2 #998
+2026/01/14-03:37:24.490 49bc Level-0 table #1001: started
+2026/01/14-03:37:24.499 49bc Level-0 table #1001: 53503 bytes OK
+2026/01/14-03:37:24.503 49bc Delete type=0 #997
+2026/01/14-03:38:06.028 2178 Level-0 table #1003: started
+2026/01/14-03:38:06.038 2178 Level-0 table #1003: 54209 bytes OK
+2026/01/14-03:38:06.040 2178 Delete type=0 #1000
