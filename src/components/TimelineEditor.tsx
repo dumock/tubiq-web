@@ -354,12 +354,26 @@ export default function TimelineEditor({
         const loadSource = async (src: string, videoEl: HTMLVideoElement): Promise<void> => {
             return new Promise((resolve, reject) => {
                 const isRemote = src.startsWith('http');
-                videoEl.src = isRemote ? `/api/proxy-video?url=${encodeURIComponent(src)}` : src;
+
+                // IMPORTANT: Set crossOrigin BEFORE src for reliable CORS handling
                 videoEl.crossOrigin = 'anonymous';
+                videoEl.preload = 'auto'; // Force load
+
+                // Add timestamp to prevent caching issues with CORS
+                videoEl.src = isRemote
+                    ? `/api/proxy-video?url=${encodeURIComponent(src)}&t=${Date.now()}`
+                    : src;
+
                 videoEl.muted = true;
 
+                // Use canplay as it might be safer than onloadedmetadata for seeking readiness
                 videoEl.onloadedmetadata = () => resolve();
-                videoEl.onerror = () => reject();
+                videoEl.onerror = (e) => {
+                    console.error('Video Load Error', e);
+                    reject(e);
+                };
+
+                // Explicitly call load()
                 videoEl.load();
             });
         };
