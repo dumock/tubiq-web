@@ -103,8 +103,8 @@ export const VideoClipItem = memo(({
                 ))}
                 {frameSlots.length === 0 && <div className="w-full h-full bg-zinc-700" />}
             </div>
-            <div className="absolute top-0.5 left-1 bg-black/60 text-white text-[9px] px-1 rounded pointer-events-none">
-                V{layerIndex + 1} Clip
+            <div className="absolute top-0.5 left-1 bg-black/60 text-white text-[9px] px-1 rounded pointer-events-none max-w-full truncate">
+                {clip.name || `V${layerIndex + 1} Clip`}
             </div>
 
             {/* Handles - Only show if not in cut mode? Original code didn't strictly hide them but they wouldn't work if stopPropagation in parent? Actually original had onMouseDown on handles. */}
