@@ -180,6 +180,7 @@ export default function TimelineEditor({
     const [frameThumbnails, setFrameThumbnails] = useState<string[]>([]);
     const [thumbnailAspectRatio, setThumbnailAspectRatio] = useState(16 / 9);
     const [isGeneratingFrames, setIsGeneratingFrames] = useState(false);
+    const isGeneratingFramesRef = useRef(false); // Ref for abort check in loop
 
     // Audio Waveform State (Stereo: L/R channels)
     const [audioWaveformL, setAudioWaveformL] = useState<number[]>([]);
@@ -418,6 +419,8 @@ export default function TimelineEditor({
 
                 // Extract all frames for this clip
                 for (const frame of frames) {
+                    if (!isGeneratingFramesRef.current) break; // Check abort
+
                     const offset = frame.time - clip.startTime;
                     const targetTime = clip.sourceStart + offset;
 
@@ -425,11 +428,16 @@ export default function TimelineEditor({
                     await new Promise<void>(resolve => {
                         const seekHandler = () => {
                             ctx.drawImage(extractionVideo, 0, 0, canvas.width, canvas.height);
-                            thumbnails[frame.index] = canvas.toDataURL('image/jpeg', 0.6); // Quality 0.6
+                            thumbnails[frame.index] = canvas.toDataURL('image/jpeg', 0.6);
                             resolve();
                         };
                         extractionVideo.addEventListener('seeked', seekHandler, { once: true });
+                        // Timeout fallback
+                        setTimeout(resolve, 3000);
                     });
+
+                    // Tiny yield to prevent UI freeze and allow network for main player
+                    await new Promise(r => setTimeout(r, 50));
                 }
             } catch (e) {
                 console.error(`Failed to extract frames for clip ${clip.id}`, e);

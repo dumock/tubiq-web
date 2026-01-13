@@ -128,6 +128,7 @@ export default function SubtitleMakerPage() {
 
     const [assets, setAssets] = useState<{ [key: string]: string }>({}); // assetId -> blobUrl
     const hasInitializedClips = useRef(false);
+    const ignoreResetRef = useRef(false); // Guard against videoUrl reset effect
 
     // Audio Separation State
     const [isAudioSeparated, setIsAudioSeparated] = useState(false);
@@ -194,6 +195,9 @@ export default function SubtitleMakerPage() {
                 const parsed = JSON.parse(autoEditData);
 
                 if (parsed.videoClips && Array.isArray(parsed.videoClips)) {
+                    // Set flag to prevent useEffect from wiping our clips when videoUrl changes
+                    ignoreResetRef.current = true;
+
                     setVideoClips(parsed.videoClips);
                     // Set videoUrl to the first clip's source to initialize the player
                     if (parsed.videoClips.length > 0) {
@@ -614,7 +618,15 @@ export default function SubtitleMakerPage() {
 
     // Reset when videoUrl changes
     useEffect(() => {
+        // If we are restoring clips (ignoreResetRef is true), don't wipe them!
+        if (ignoreResetRef.current) {
+            ignoreResetRef.current = false;
+            return;
+        }
         hasInitializedClips.current = false;
+        // Only clear clips if we are actually loading a NEW single video file
+        // If we have multiple clips effectively managed, this might be aggressive.
+        // For now, relies on the Ref guard during restore.
         setVideoClips([]);
     }, [videoUrl]);
 
