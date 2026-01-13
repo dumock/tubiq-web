@@ -187,6 +187,29 @@ export default function SubtitleMakerPage() {
     // LOAD state from localStorage on mount
     useEffect(() => {
         try {
+            // 1. Check for Auto Edit Project (One-time handoff)
+            const autoEditData = localStorage.getItem('tubiq-edit-project');
+            if (autoEditData) {
+                console.log('[SubtitleMaker] Found Auto Edit Project data');
+                const parsed = JSON.parse(autoEditData);
+
+                if (parsed.videoClips && Array.isArray(parsed.videoClips)) {
+                    setVideoClips(parsed.videoClips);
+                    // Set videoUrl to the first clip's source to initialize the player
+                    if (parsed.videoClips.length > 0) {
+                        setVideoUrl(parsed.videoClips[0].src);
+                    }
+                }
+                if (parsed.subtitles && Array.isArray(parsed.subtitles)) {
+                    setSubtitles(parsed.subtitles);
+                }
+
+                // CONSUME the data so it doesn't overwrite manual edits on reload
+                localStorage.removeItem('tubiq-edit-project');
+                return;
+            }
+
+            // 2. Normal State Restore
             const saved = localStorage.getItem(STORAGE_KEY);
             if (saved) {
                 const parsed = JSON.parse(saved);
