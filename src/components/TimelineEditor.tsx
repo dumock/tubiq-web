@@ -329,9 +329,13 @@ export default function TimelineEditor({
 
     // Multi-clip Frame Extraction
     const generateFrameThumbnails = useCallback(async () => {
-        if (!videoElement || isGeneratingFrames || videoClips.length === 0) return;
+        if (!videoElement || duration <= 0 || videoClips.length === 0) return;
+
+        // Prevent double run if already running (check ref for immediate feedback)
+        if (isGeneratingFramesRef.current) return;
 
         setIsGeneratingFrames(true);
+        isGeneratingFramesRef.current = true; // Sync Ref
         onFrameExtractionChange?.(true);
 
         const canvasHeight = 480;
@@ -343,6 +347,7 @@ export default function TimelineEditor({
 
         if (!ctx) {
             setIsGeneratingFrames(false);
+            isGeneratingFramesRef.current = false; // Reset Ref
             onFrameExtractionChange?.(false);
             return;
         }
@@ -462,6 +467,7 @@ export default function TimelineEditor({
 
         setFrameThumbnails(thumbnails);
         setIsGeneratingFrames(false);
+        isGeneratingFramesRef.current = false; // Reset Ref
         onFrameExtractionChange?.(false);
     }, [videoElement, duration, videoClips, onFrameExtractionChange]);
 
