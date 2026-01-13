@@ -929,7 +929,7 @@ export default function StoryboardPage() {
     // --- AI Auto Edit Logic ---
     const handleAutoEdit = () => {
         // 1. Gather all generated videos
-        const videoScenes = scenes.filter(s => s.videoUrl && s.videoStatus === 'completed');
+        const videoScenes = scenes.filter(s => s.videoUrl && s.videoStatus === 'complete');
 
         if (videoScenes.length === 0) {
             alert('생성된 영상이 없습니다. 영상을 먼저 생성해주세요.');
