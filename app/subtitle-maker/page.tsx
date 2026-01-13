@@ -1577,20 +1577,38 @@ export default function SubtitleMakerPage() {
 
     // Stable Handlers for SubtitleRow Optimization
     const handleTimelineSeek = (time: number) => {
-        // 1. Update Video Element IMMEDIATELY (Direct DOM)
+        const safeTime = Math.max(0, Math.min(time, duration));
+
+        // MULTI-CLIP SEQUENCER: Determine target clip
+        const targetClip = videoClips.find(c => safeTime >= c.startTime && safeTime < c.endTime);
+
         if (videoRef.current) {
-            const safeTime = Math.max(0, Math.min(time, duration));
-            // Only update if difference is significant to avoid micro-jitters,
-            // but for scrubbing we usually want raw updates.
-            if (Math.abs(videoRef.current.currentTime - safeTime) > 0.01) {
-                videoRef.current.currentTime = safeTime;
+            // If target clip exists and has a different source, switch it
+            if (targetClip && targetClip.src) {
+                const currentSrc = videoRef.current.src;
+                // Check if source needs changing (compare URLs)
+                if (!currentSrc.includes(targetClip.src.split('/').pop() || '')) {
+                    console.log('[Sequencer] Switching source on seek to:', targetClip.name || targetClip.src);
+                    videoRef.current.src = targetClip.src;
+                }
+
+                // Calculate local time within the source file
+                const localTime = targetClip.sourceStart + (safeTime - targetClip.startTime);
+                if (Math.abs(videoRef.current.currentTime - localTime) > 0.01) {
+                    videoRef.current.currentTime = localTime;
+                }
+            } else {
+                // Fallback: No clip found, seek directly (single file mode)
+                if (Math.abs(videoRef.current.currentTime - safeTime) > 0.01) {
+                    videoRef.current.currentTime = safeTime;
+                }
             }
 
-            // 2. Sync React State (for UI/Playhead)
+            // Sync React State (for UI/Playhead)
             setCurrentTime(safeTime);
         }
 
-        // 3. Pause if playing (Optimized to avoid redundant state updates)
+        // Pause if playing (Optimized to avoid redundant state updates)
         if (isPlaying) {
             setIsPlaying(false);
             if (videoRef.current) videoRef.current.pause();
