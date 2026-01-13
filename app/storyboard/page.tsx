@@ -1,12 +1,13 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import Header from '@/components/Header';
 import {
     Trash2, Plus, Image as ImageIcon, Film, Loader2, Save, Play, Sparkles,
     RefreshCcw, MonitorPlay, ChevronDown, ChevronUp, Settings, Paintbrush,
     Check, X, Pencil, MoreHorizontal, GripVertical, Video, Download, Scissors, AlertCircle,
-    Volume2, VolumeX, Pause, Link, Unlink, Zap, StopCircle, Square, RotateCcw
+    Volume2, VolumeX, Pause, Link, Unlink, Zap, StopCircle, Square, RotateCcw, Wand2
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import GrokWorkerControl from '@/components/GrokWorkerControl';
@@ -286,6 +287,7 @@ const CustomVideoPlayer = ({ src, poster }: { src: string; poster?: string }) =>
 };
 
 export default function StoryboardPage() {
+    const router = useRouter();
     // Data State
     const [scenes, setScenes] = useState<Scene[]>([]);
     const [globalScript, setGlobalScript] = useState('');
@@ -924,46 +926,45 @@ export default function StoryboardPage() {
         setScenes(scenes.map(s => s.id === id ? { ...s, [field]: value } : s));
     };
 
-    const handleDownloadAllImages = async () => {
-        const imagesToDownload = scenes.filter(s => s.imageUrl);
-        if (imagesToDownload.length === 0) {
-            alert('다운로드할 이미지가 없습니다.');
+    // --- AI Auto Edit Logic ---
+    const handleAutoEdit = () => {
+        // 1. Gather all generated videos
+        const videoScenes = scenes.filter(s => s.videoUrl && s.videoStatus === 'completed');
+
+        if (videoScenes.length === 0) {
+            alert('생성된 영상이 없습니다. 영상을 먼저 생성해주세요.');
             return;
         }
 
-        // Download each image with a slight delay to avoid browser blocking
-        for (let i = 0; i < imagesToDownload.length; i++) {
-            const scene = imagesToDownload[i];
-            await handleDownloadImage(scene.imageUrl!, `scene-${i + 1}.png`);
-            await new Promise(resolve => setTimeout(resolve, 300)); // Small delay between downloads
-        }
-    };
+        // 2. Construct Video Clips (Sequential)
+        const clips = videoScenes.map((s, index) => ({
+            id: crypto.randomUUID(),
+            src: s.videoUrl!,
+            type: 'video',
+            name: `Scene ${index + 1}`,
+            startOffset: index * 4, // Default 4s duration per clip
+            duration: 4,
+            layer: 0,
+            trackId: 'main-track'
+        }));
 
-    const handleDownloadImage = async (imageUrl: string, filename: string) => {
-        try {
-            // Use proxy to avoid CORS errors
-            const proxyUrl = `/api/proxy-download?url=${encodeURIComponent(imageUrl)}`;
-            const res = await fetch(proxyUrl);
+        // 3. Construct Subtitles from Scripts
+        const subtitles = videoScenes.map((s, index) => ({
+            id: crypto.randomUUID(),
+            text: s.script,
+            start: index * 4,
+            end: (index * 4) + 4
+        }));
 
-            if (!res.ok) throw new Error('Proxy fetch failed');
+        // 4. Save to LocalStorage
+        const projectData = {
+            videoClips: clips,
+            subtitles: subtitles
+        };
+        localStorage.setItem('tubiq-edit-project', JSON.stringify(projectData));
 
-            const blob = await res.blob();
-            const blobUrl = URL.createObjectURL(blob);
-
-            const link = document.createElement('a');
-            link.href = blobUrl;
-            link.download = filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-
-            // Clean up the blob URL
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
-        } catch (e) {
-            console.error('Download failed:', e);
-            // Fallback: open in new tab
-            window.open(imageUrl, '_blank');
-        }
+        // 5. Redirect to Subtitle Maker
+        router.push('/subtitle-maker');
     };
 
     const isChainRunning = useRef(false);
@@ -1774,11 +1775,11 @@ export default function StoryboardPage() {
                                     </button>
                                 )}
                                 <button
-                                    onClick={handleDownloadAllImages}
-                                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all shadow-md active:scale-95"
+                                    onClick={handleAutoEdit}
+                                    className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-sm flex items-center gap-2 transition-all shadow-lg hover:shadow-xl active:scale-95 ring-2 ring-indigo-500/20"
                                 >
-                                    <Save className="h-3.5 w-3.5" />
-                                    다운로드
+                                    <Wand2 className="h-4 w-4" />
+                                    AI 자동편집
                                 </button>
                             </div>
                         </div>
