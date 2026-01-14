@@ -7,6 +7,7 @@ interface VideoClip {
     sourceStart: number;
     sourceEnd: number;
     src?: string; // Optional: support multiple sources later
+    layer?: number; // 0 = Main, 1+ = Overlay
     // ... other props
 }
 
@@ -50,13 +51,27 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
                     if (activeClip) {
                         // 1.5 CHECK SOURCE
                         // Dynamic Source Switching: If src changed, load new source
-                        if (activeClip.src && video.src !== activeClip.src) {
-                            // Only switch if different (avoid reload loops)
-                            // Check if current src is relative or different
+                        if (activeClip.src) {
                             const currentSrc = video.currentSrc || video.src;
-                            // Need loose check or exact check.
-                            if (!currentSrc.endsWith(activeClip.src) && currentSrc !== activeClip.src) {
-                                console.log('[Engine] Switching Source:', activeClip.src);
+                            // Robust URL comparison - extract pathname for comparison
+                            let needsSwitch = false;
+                            try {
+                                const currentUrl = new URL(currentSrc);
+                                const targetUrl = new URL(activeClip.src);
+                                // Compare pathnames (ignores query params like tokens)
+                                needsSwitch = currentUrl.pathname !== targetUrl.pathname;
+                            } catch {
+                                // If URL parsing fails, do string comparison
+                                needsSwitch = currentSrc !== activeClip.src && !currentSrc.includes(activeClip.src);
+                            }
+
+                            if (needsSwitch) {
+                                console.log('[Engine] Switching Source for clip:', {
+                                    clipId: activeClip.id?.substring(0, 8),
+                                    startTime: activeClip.startTime,
+                                    endTime: activeClip.endTime,
+                                    src: activeClip.src.substring(0, 80)
+                                });
                                 video.src = activeClip.src;
                                 // After changing src, we MUST wait for metadata or just seek?
                                 // Usually setting src resets everything.
@@ -127,9 +142,53 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
         };
     }, [isPlaying, animate, videoRef]);
 
-    const play = useCallback(() => setIsPlaying(true), []);
-    const pause = useCallback(() => setIsPlaying(false), []);
-    const togglePlay = useCallback(() => setIsPlaying(p => !p), []);
+    const play = useCallback(() => {
+        // Initialize video source for the active clip at currentTime before starting
+        const video = videoRef.current;
+        if (video && videoClips.length > 0) {
+            const activeClip = videoClips.find(clip =>
+                currentTime >= clip.startTime && currentTime < clip.endTime
+            ) || videoClips[0]; // Fallback to first clip
+
+            if (activeClip?.src) {
+                const currentSrc = video.currentSrc || video.src;
+                let needsSwitch = !currentSrc;
+                if (currentSrc && activeClip.src) {
+                    try {
+                        const currentUrl = new URL(currentSrc);
+                        const targetUrl = new URL(activeClip.src);
+                        needsSwitch = currentUrl.pathname !== targetUrl.pathname;
+                    } catch {
+                        needsSwitch = currentSrc !== activeClip.src;
+                    }
+                }
+
+                if (needsSwitch) {
+                    console.log('[Engine] Play: Initializing source:', activeClip.src.substring(0, 100));
+                    video.src = activeClip.src;
+                }
+
+                // Seek to correct position in the source
+                const targetVideoTime = activeClip.sourceStart + (currentTime - activeClip.startTime);
+                video.currentTime = Math.max(0, targetVideoTime);
+
+                // Start video playback
+                video.play().catch(e => console.warn('[Engine] Auto-play blocked:', e));
+            }
+        }
+        setIsPlaying(true);
+    }, [videoRef, videoClips, currentTime]);
+    const pause = useCallback(() => {
+        setIsPlaying(false);
+        videoRef.current?.pause();
+    }, [videoRef]);
+    const togglePlay = useCallback(() => {
+        if (isPlaying) {
+            pause();
+        } else {
+            play();
+        }
+    }, [isPlaying, play, pause]);
 
     // Allow external manual seeking
     const seek = useCallback((time: number) => {
@@ -143,6 +202,24 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
                 time >= clip.startTime && time < clip.endTime
             );
             if (activeClip) {
+                // Check if we need to switch source
+                if (activeClip.src) {
+                    const currentSrc = video.currentSrc || video.src;
+                    let needsSwitch = false;
+                    try {
+                        const currentUrl = new URL(currentSrc);
+                        const targetUrl = new URL(activeClip.src);
+                        needsSwitch = currentUrl.pathname !== targetUrl.pathname;
+                    } catch {
+                        needsSwitch = currentSrc !== activeClip.src && !currentSrc.includes(activeClip.src);
+                    }
+
+                    if (needsSwitch) {
+                        console.log('[Engine] Seek: Switching Source:', activeClip.src.substring(0, 100));
+                        video.src = activeClip.src;
+                    }
+                }
+
                 const targetVideoTime = activeClip.sourceStart + (time - activeClip.startTime);
                 video.currentTime = targetVideoTime;
             } else {

@@ -112,8 +112,16 @@ export default function SubtitleMakerPage() {
         type?: string; // Added for consistency with instruction's newClip
         name?: string; // Added for consistency with instruction's newClip
         startOffset?: number; // Added for consistency with instruction's newClip
+        frames?: string[]; // Per-clip frame thumbnails
+        previewPosition?: { x: number; y: number }; // Position in preview (percentage)
+        scale?: number; // Scale factor (default 1)
     }
     const [videoClips, setVideoClips] = useState<VideoClip[]>([]);
+
+    // Interaction State
+    const [draggingOverlayId, setDraggingOverlayId] = useState<string | null>(null);
+    const [resizingOverlayId, setResizingOverlayId] = useState<string | null>(null);
+    const resizeStartData = useRef<{ startScale: number; startDist: number } | null>(null);
 
     // Audio Clips State (for separated audio editing)
     interface AudioClip {
@@ -143,11 +151,18 @@ export default function SubtitleMakerPage() {
     const lastVideoClipIdRef = useRef<string | null>(null);
     const audioRef = useRef<HTMLAudioElement>(null);
 
-    // Double Buffer Refs (Layer 0 Specific)
-    const primaryRefA = useRef<HTMLVideoElement>(null);
-    const primaryRefB = useRef<HTMLVideoElement>(null);
-    const activeBufferRef = useRef<0 | 1>(0); // 0 = A, 1 = B
-    const preparedClipIdRef = useRef<string | null>(null); // Track what's buffered in standby
+    // Canvas & Video Refs for Compositing
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const hiddenVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+    const [mainVideoElement, setMainVideoElement] = useState<HTMLVideoElement | null>(null);
+
+    // Removed Double Buffer Refs
+    const mainVideoRef = useRef<HTMLVideoElement>(null);
+    // const [videoElementReady, setVideoElementReady] = useState<HTMLVideoElement | null>(null); // Replaced by mainVideoElement
+    const preparedClipIdRef = useRef<string | null>(null);
+
+
+    const [playbackTime, setPlaybackTime] = useState(0);
 
     // =============================
     // PLAYBACK ENGINE
@@ -160,10 +175,12 @@ export default function SubtitleMakerPage() {
         togglePlay,
         seek
     } = useTimelineEngine({
-        videoRef: primaryRefB, // Connect to actual video element
+        videoRef: mainVideoRef, // Connect to main video element
         videoClips,
         duration,
-        onTimeUpdate: (time) => { /* Optional */ }
+        onTimeUpdate: (time) => {
+            setPlaybackTime(time);
+        }
     });
 
     const setCurrentTime = (timeOrFn: number | ((prev: number) => number)) => {
@@ -193,6 +210,9 @@ export default function SubtitleMakerPage() {
             if (autoEditData) {
                 console.log('[SubtitleMaker] Found Auto Edit Project data');
                 const parsed = JSON.parse(autoEditData);
+                console.log('[SubtitleMaker] Parsed clips:', parsed.videoClips?.length, 'clips');
+                console.log('[SubtitleMaker] First clip:', JSON.stringify(parsed.videoClips?.[0], null, 2));
+                console.log('[SubtitleMaker] All clips src:', parsed.videoClips?.map((c: any) => c.src?.substring(0, 50)));
 
                 if (parsed.videoClips && Array.isArray(parsed.videoClips)) {
                     // Set flag to prevent useEffect from wiping our clips when videoUrl changes
@@ -214,6 +234,7 @@ export default function SubtitleMakerPage() {
                 // Set initial duration from clips if available
                 if (parsed.videoClips && parsed.videoClips.length > 0) {
                     const maxTime = Math.max(...parsed.videoClips.map((c: any) => c.endTime || 0));
+                    console.log('[SubtitleMaker] Setting duration from clips:', maxTime);
                     if (maxTime > 0) setDuration(maxTime);
                 }
 
@@ -648,12 +669,18 @@ export default function SubtitleMakerPage() {
         }
     }, [duration, videoUrl]);
 
-    // Set initial src for primaryRefB
+    // Set initial src for mainVideoRef - prioritize first clip's src for multi-clip scenarios
     useEffect(() => {
-        if (videoUrl && primaryRefB.current) {
-            primaryRefB.current.src = videoUrl;
+        if (mainVideoRef.current) {
+            // Priority: first clip's src > videoUrl
+            const firstClipSrc = videoClips.length > 0 ? videoClips[0].src : null;
+            const srcToSet = firstClipSrc || videoUrl;
+            if (srcToSet && mainVideoRef.current.src !== srcToSet) {
+                console.log('[SubtitleMaker] Setting mainVideoRef src:', srcToSet?.substring(0, 80));
+                mainVideoRef.current.src = srcToSet;
+            }
         }
-    }, [videoUrl]);
+    }, [videoUrl, videoClips]);
 
     // Dynamic Active Layers
     const activeLayers = useMemo(() => {
@@ -975,7 +1002,8 @@ export default function SubtitleMakerPage() {
                             sourceStart: 0,
                             sourceEnd: newDuration,
                             layer: newLayer,
-                            assetId: assetId
+                            assetId: assetId,
+                            src: localUrl // Ensure src is present for frame extraction
                         };
                         updateVideoClipsWithHistory(prev => [...prev, newClip]);
                     };
@@ -1024,7 +1052,8 @@ export default function SubtitleMakerPage() {
                 sourceStart: 0,
                 sourceEnd: newDuration,
                 layer: newLayer,
-                assetId: assetId
+                assetId: assetId,
+                src: localUrl
             };
 
             updateVideoClipsWithHistory(prev => [...prev, newClip]);
@@ -1038,145 +1067,137 @@ export default function SubtitleMakerPage() {
 
 
 
-    // Sync Video Elements to CurrentTime (Double Buffered for Layer 0)
+    // =============================
+    // CANVAS COMPOSITING LOOP
+    // =============================
     useEffect(() => {
-        // --- Layer 0: Double Buffering Logic ---
-        const activeIdx = activeBufferRef.current;
-        const standbyIdx = activeIdx === 0 ? 1 : 0;
+        let animationFrameId: number;
 
-        const activeEl = activeIdx === 0 ? primaryRefA.current : primaryRefB.current;
-        const standbyEl = standbyIdx === 0 ? primaryRefA.current : primaryRefB.current;
+        const renderLoop = () => {
+            const canvas = canvasRef.current;
+            const ctx = canvas?.getContext('2d', { alpha: false }); // Optimize for no transparency
 
-        // Propagate active ref for external use
-        if (videoRef.current !== activeEl) {
-            videoRef.current = activeEl;
-        }
+            if (canvas && ctx) {
+                // 1. Clear Canvas
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        const currentClip = videoClips.find(c => (c.layer || 0) === 0 && currentTime >= c.startTime && currentTime < c.endTime);
-        const nextClip = videoClips.find(c => (c.layer || 0) === 0 && c.startTime > currentTime); // Next clip effectively
+                // 2. Identify Active Clips at Current Time
+                // We use the Main Video's time as the source of truth if playing, else state time
+                const masterTime = mainVideoElement && !mainVideoElement.paused
+                    ? mainVideoElement.currentTime
+                    : playbackTime;
 
-        // 1. Handle Active Player
-        if (activeEl && currentClip) {
-            const clipAssetUrl = currentClip.assetId ? assets[currentClip.assetId] : assets['main'] || videoUrl;
+                // Sync State Time if playing (Throttle state updates if needed, but here we just read)
 
-            // Source Check
-            if (clipAssetUrl && !activeEl.src.includes(clipAssetUrl)) {
-                activeEl.src = clipAssetUrl;
-                // Immediate seek after source change handled by drift logic below
-            }
+                const activeClips = videoClips
+                    .filter(c => masterTime >= c.startTime && masterTime < c.endTime)
+                    .sort((a, b) => (a.layer || 0) - (b.layer || 0));
 
-            // Visibility
-            activeEl.style.opacity = '1';
-            activeEl.style.zIndex = '1';
+                // 3. Draw Clips (Layer 0 -> N)
+                activeClips.forEach(clip => {
+                    let videoEl: HTMLVideoElement | undefined;
 
-            // Time Sync
-            const offset = currentTime - currentClip.startTime;
-            const sourceTime = currentClip.sourceStart + offset;
-
-            if (Number.isFinite(sourceTime)) {
-                const drift = Math.abs(activeEl.currentTime - sourceTime);
-                const clipChanged = lastVideoClipIdRef.current !== currentClip.id;
-
-                if (isPlaying) {
-                    if (activeEl.paused) activeEl.play().catch(() => { });
-
-                    // If we just swapped, allow a tiny bit of drift initially to let it roll, 
-                    // unless it's way off (missed pre-seek).
-                    if (drift > 0.08) {
-                        activeEl.currentTime = sourceTime;
-                    }
-                } else {
-                    if (!activeEl.paused) activeEl.pause();
-                    if (drift > 0.04) activeEl.currentTime = sourceTime;
-                }
-            }
-
-            // Update tracker
-            if (currentClip && lastVideoClipIdRef.current !== currentClip.id) {
-                lastVideoClipIdRef.current = currentClip.id;
-            }
-        } else if (activeEl) {
-            // No active clip? Hide.
-            activeEl.style.opacity = '0';
-            if (!activeEl.paused) activeEl.pause();
-        }
-
-        // 2. Handle Standby Player (Pre-buffer Next)
-        if (standbyEl && nextClip) {
-            const nextAssetUrl = nextClip.assetId ? assets[nextClip.assetId] : assets['main'] || videoUrl;
-
-            // Only prep if not already prepped for this clip
-            if (preparedClipIdRef.current !== nextClip.id) {
-                if (nextAssetUrl && !standbyEl.src.includes(nextAssetUrl)) {
-                    standbyEl.src = nextAssetUrl;
-                }
-                // Pre-seek to start
-                standbyEl.currentTime = nextClip.sourceStart;
-                standbyEl.pause(); // Ensure paused
-                preparedClipIdRef.current = nextClip.id;
-                // console.log(`[Buffer] Prepped ${nextClip.id} at ${nextClip.sourceStart}`);
-            }
-        } else if (standbyEl) {
-            standbyEl.style.opacity = '0';
-            if (!standbyEl.paused) standbyEl.pause();
-        }
-
-        // 3. Detect Buffer Swap Condition
-        // If we are very close to the end of current clip, OR we just detected a clip ID change that matches the prepared one...
-        // Actually, the simplest trigger is: currentClip ID == preparedClipId.
-        if (currentClip && preparedClipIdRef.current === currentClip.id) {
-            // We have transitioned into the clip we prepared for!
-            // Swap buffers!
-            activeBufferRef.current = standbyIdx as 0 | 1;
-            preparedClipIdRef.current = null; // Reset prep
-            //  console.log(`[Buffer] SWAM! Now Active: ${standbyIdx}`);
-
-            // Ensure new active is playing if needed
-            const newActive = activeBufferRef.current === 0 ? primaryRefA.current : primaryRefB.current;
-            if (isPlaying && newActive) newActive.play().catch(() => { });
-        }
-
-
-        // --- Other Layers (1+) ---
-        activeLayers.forEach(layer => {
-            if (layer === 0) return; // Handled above
-
-            const videoEl = videoRefs.current[layer];
-            if (!videoEl) return;
-
-            const clip = videoClips.find(c => (c.layer || 0) === layer && currentTime >= c.startTime && currentTime < c.endTime);
-
-            if (clip) {
-                const clipAssetUrl = clip.assetId ? assets[clip.assetId] : assets['main'] || videoUrl;
-                if (clipAssetUrl && videoEl.src !== clipAssetUrl && videoEl.src !== window.location.origin + clipAssetUrl) {
-                    if (!videoEl.src.includes(clipAssetUrl)) {
-                        videoEl.src = clipAssetUrl;
-                    }
-                }
-
-                videoEl.style.opacity = '1';
-                videoEl.style.zIndex = `${layer + 1}`;
-
-                const offset = currentTime - clip.startTime;
-                const sourceTime = clip.sourceStart + offset;
-
-                if (Number.isFinite(sourceTime)) {
-                    const drift = Math.abs(videoEl.currentTime - sourceTime);
-
-                    if (isPlaying) {
-                        if (videoEl.paused) videoEl.play().catch(() => { });
-                        if (drift > 0.08) videoEl.currentTime = sourceTime;
+                    if ((clip.layer || 0) === 0) {
+                        videoEl = mainVideoElement || undefined;
                     } else {
-                        if (!videoEl.paused) videoEl.pause();
-                        if (drift > 0.05) videoEl.currentTime = sourceTime;
+                        videoEl = hiddenVideoRefs.current.get(clip.id);
                     }
-                }
-            } else {
-                videoEl.style.opacity = '0';
-                if (!videoEl.paused) videoEl.pause();
+
+                    if (videoEl && videoEl.readyState >= 2) { // HAVE_CURRENT_DATA
+                        // Sync Overlay Videos to Master Time
+                        if ((clip.layer || 0) > 0) {
+                            const offset = masterTime - clip.startTime;
+                            const sourceTime = clip.sourceStart + offset;
+
+                            // Sync Check
+                            const diff = Math.abs(videoEl.currentTime - sourceTime);
+                            if (diff > 0.25) { // 250ms tolerance (relaxed to prevent stutter)
+                                videoEl.currentTime = sourceTime;
+                            }
+
+                            // Play State Sync
+                            if (isPlaying && videoEl.paused) videoEl.play().catch(() => { });
+                            else if (!isPlaying && !videoEl.paused) videoEl.pause();
+                        }
+
+                        // Calculate Draw Position
+                        const width = canvas.width;
+                        const height = canvas.height;
+
+                        let drawX = 0;
+                        let drawY = 0;
+                        let drawW = width;
+                        let drawH = height;
+
+                        if ((clip.layer || 0) === 0) {
+                            // Layer 0: Contain (Fit Center)
+                            const srcRatio = videoEl.videoWidth / videoEl.videoHeight;
+                            const dstRatio = width / height;
+
+                            if (srcRatio > dstRatio) {
+                                // Source is wider (Letterbox top/bottom)
+                                drawW = width;
+                                drawH = width / srcRatio;
+                                drawY = (height - drawH) / 2;
+                            } else {
+                                // Source is taller (Pillarbox left/right)
+                                drawH = height;
+                                drawW = height * srcRatio;
+                                drawX = (width - drawW) / 2;
+                            }
+                        }
+
+                        // Apply Preview Position for Overlays
+                        if ((clip.layer || 0) > 0 && clip.previewPosition) {
+                            const { x, y } = clip.previewPosition;
+                            const scale = clip.scale || 1;
+
+                            // Base Size: CONTAIN (Fit to Screen 100%)
+                            let baseW = width;
+                            let baseH = height;
+
+                            const aspect = videoEl.videoWidth / videoEl.videoHeight || (16 / 9);
+
+                            // Calculate Contain Dimensions
+                            if (width / height > aspect) {
+                                // Canvas is wider than video -> fit height
+                                baseH = height;
+                                baseW = height * aspect;
+                            } else {
+                                // Canvas is taller than video -> fit width
+                                baseW = width;
+                                baseH = width / aspect;
+                            }
+
+                            // Apply Scale
+                            drawW = baseW * scale;
+                            drawH = baseH * scale;
+
+                            // Position (Center)
+                            drawX = (x / 100) * width - (drawW / 2);
+                            drawY = (y / 100) * height - (drawH / 2);
+                        }
+
+                        ctx.drawImage(videoEl, drawX, drawY, drawW, drawH);
+                    }
+                });
             }
-        });
-    }, [currentTime, videoClips, activeLayers, isPlaying, assets, videoUrl]);
+
+            animationFrameId = requestAnimationFrame(renderLoop);
+        };
+
+        renderLoop();
+
+        return () => {
+            cancelAnimationFrame(animationFrameId);
+        };
+    }, [videoClips, playbackTime, isPlaying, mainVideoElement]); // Dependencies
+
+    // Audio Sync for Overlays (Volume/Mute)
+    // We unmute all active overlays to allow mixing, or handle volume.
+    // Assuming simple mixing for now.
 
     // Audio Engine (for Separated Audio)
     useEffect(() => {
@@ -1579,41 +1600,38 @@ export default function SubtitleMakerPage() {
     const handleTimelineSeek = (time: number) => {
         const safeTime = Math.max(0, Math.min(time, duration));
 
-        // MULTI-CLIP SEQUENCER: Determine target clip
-        const targetClip = videoClips.find(c => safeTime >= c.startTime && safeTime < c.endTime);
+        // Update State
+        setCurrentTime(safeTime);
 
-        if (videoRef.current) {
-            // If target clip exists and has a different source, switch it
-            if (targetClip && targetClip.src) {
-                const currentSrc = videoRef.current.src;
-                // Check if source needs changing (compare URLs)
-                if (!currentSrc.includes(targetClip.src.split('/').pop() || '')) {
-                    console.log('[Sequencer] Switching source on seek to:', targetClip.name || targetClip.src);
-                    videoRef.current.src = targetClip.src;
-                }
+        // Sync Audio (Single Track for now)
+        if (audioRef.current) {
+            const activeAudio = audioClips.find(c => safeTime >= c.startTime && safeTime < c.endTime);
+            if (activeAudio) {
+                const offset = safeTime - activeAudio.startTime;
+                audioRef.current.currentTime = activeAudio.sourceStart + offset;
+            }
+        }
 
-                // Calculate local time within the source file
-                const localTime = targetClip.sourceStart + (safeTime - targetClip.startTime);
-                if (Math.abs(videoRef.current.currentTime - localTime) > 0.01) {
-                    videoRef.current.currentTime = localTime;
-                }
-            } else {
-                // Fallback: No clip found, seek directly (single file mode)
-                if (Math.abs(videoRef.current.currentTime - safeTime) > 0.01) {
-                    videoRef.current.currentTime = safeTime;
+        // Sync Layer 0 (Main Video)
+        if (mainVideoElement) {
+            mainVideoElement.currentTime = safeTime;
+        } else if (mainVideoRef.current) {
+            mainVideoRef.current.currentTime = safeTime;
+        }
+
+        // Sync Overlay Videos (Hidden)
+        videoClips.forEach(clip => {
+            if ((clip.layer || 0) > 0) {
+                const videoEl = hiddenVideoRefs.current.get(clip.id);
+                if (videoEl) {
+                    const offset = safeTime - clip.startTime;
+                    videoEl.currentTime = clip.sourceStart + offset;
                 }
             }
-
-            // Sync React State (for UI/Playhead)
-            setCurrentTime(safeTime);
-        }
-
-        // Pause if playing (Optimized to avoid redundant state updates)
-        if (isPlaying) {
-            setIsPlaying(false);
-            if (videoRef.current) videoRef.current.pause();
-        }
+        });
     };
+
+
 
     // History-aware handlers
     // 1. For SubtitleRow (Object-based & Cursor-based)
@@ -1841,6 +1859,81 @@ export default function SubtitleMakerPage() {
         };
     }, [isQDriveOpen]);
 
+    // Overlay Interaction (Move & Resize)
+    const handleOverlayPointerDown = (e: React.PointerEvent, clipId: string, type: 'move' | 'resize') => {
+        e.preventDefault();
+        e.stopPropagation();
+        const target = e.target as Element;
+        target.setPointerCapture(e.pointerId);
+
+        if (type === 'resize') {
+            setResizingOverlayId(clipId);
+            // Calculate initial distance for scaling
+            if (videoContainerRef.current) {
+                const rect = videoContainerRef.current.getBoundingClientRect();
+                const clip = videoClips.find(c => c.id === clipId);
+                if (clip) {
+                    const center = clip.previewPosition || { x: 50, y: 50 };
+                    const centerX = rect.left + (rect.width * (center.x / 100));
+                    const centerY = rect.top + (rect.height * (center.y / 100));
+                    const dist = Math.hypot(e.clientX - centerX, e.clientY - centerY);
+                    resizeStartData.current = { startScale: clip.scale || 1, startDist: dist };
+                }
+            }
+        } else {
+            setDraggingOverlayId(clipId);
+        }
+    };
+
+    const handleOverlayPointerMove = (e: React.PointerEvent) => {
+        if (!videoContainerRef.current) return;
+        const container = videoContainerRef.current;
+        const rect = container.getBoundingClientRect();
+
+        // 1. Handle Resizing
+        if (resizingOverlayId && resizeStartData.current) {
+            const clip = videoClips.find(c => c.id === resizingOverlayId);
+            if (clip) {
+                const center = clip.previewPosition || { x: 50, y: 50 };
+                const centerX = rect.left + (rect.width * (center.x / 100));
+                const centerY = rect.top + (rect.height * (center.y / 100));
+
+                const curDist = Math.hypot(e.clientX - centerX, e.clientY - centerY);
+                const scaleFactor = curDist / resizeStartData.current.startDist;
+                const newScale = Math.max(0.1, resizeStartData.current.startScale * scaleFactor);
+
+                setVideoClips(prev => prev.map(c =>
+                    c.id === resizingOverlayId ? { ...c, scale: newScale } : c
+                ));
+            }
+            return;
+        }
+
+        // 2. Handle Moving
+        if (draggingOverlayId) {
+            // Calculate percentage relative to container
+            const x = ((e.clientX - rect.left) / rect.width) * 100;
+            const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+            // Clamp values (allow slight overdraw for ease)
+            const clampedX = Math.max(-20, Math.min(120, x));
+            const clampedY = Math.max(-20, Math.min(120, y));
+
+            setVideoClips(prev => prev.map(c =>
+                c.id === draggingOverlayId
+                    ? { ...c, previewPosition: { x: clampedX, y: clampedY } }
+                    : c
+            ));
+        }
+    };
+
+    const handleOverlayPointerUp = (e: React.PointerEvent) => {
+        (e.target as Element).releasePointerCapture(e.pointerId);
+        setDraggingOverlayId(null);
+        setResizingOverlayId(null);
+        resizeStartData.current = null;
+    };
+
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-black font-sans text-gray-900 dark:text-gray-100 flex flex-col">
             <Header />
@@ -2023,18 +2116,32 @@ export default function SubtitleMakerPage() {
                                 {videoUrl ? (
                                     <>
                                         {/* Multi-Track Video Renderer */}
-                                        <div className="relative w-full h-full bg-black">
-                                            <div className="relative w-full h-full bg-black">
-                                                {/* Layer 0: Double Buffering Pair */}
+                                        <div ref={videoContainerRef} className="relative w-full h-full bg-black">
+                                            {/* CANVAS DISPLAY: Vertical 9:16 for Shorts */}
+                                            <canvas
+                                                ref={canvasRef}
+                                                width={1080}
+                                                height={1920}
+                                                className="absolute inset-0 w-full h-full object-contain"
+                                                style={{ zIndex: 1 }}
+                                            />
+
+                                            {/* HIDDEN VIDEO POOL (Sources) */}
+                                            <div style={{ display: 'none' }}>
+                                                {/* Main Video (Layer 0) */}
                                                 <video
-                                                    ref={primaryRefA}
+                                                    ref={(el) => {
+                                                        mainVideoRef.current = el;
+                                                        if (el && !mainVideoElement) setMainVideoElement(el);
+                                                    }}
                                                     src={videoUrl || ''}
-                                                    className="absolute inset-0 w-full h-full object-cover transition-opacity duration-75"
-                                                    style={{ zIndex: 1, opacity: 0 }}
                                                     preload="auto"
-                                                    muted={true} // Always muxed or muted
+                                                    muted={false} // Enable Audio
+                                                    onTimeUpdate={(e) => {
+                                                        const t = e.currentTarget.currentTime;
+                                                        setPlaybackTime(t);
+                                                    }}
                                                     onLoadedMetadata={(e) => {
-                                                        // Init clips only once
                                                         const dur = e.currentTarget.duration;
                                                         if (!hasInitializedClips.current) {
                                                             setDuration(dur);
@@ -2044,36 +2151,88 @@ export default function SubtitleMakerPage() {
                                                                 endTime: dur,
                                                                 sourceStart: 0,
                                                                 sourceEnd: dur,
-                                                                layer: 0
+                                                                layer: 0,
+                                                                scale: 1, // Default scale
+                                                                src: e.currentTarget.currentSrc || videoUrl || ''
                                                             }]);
                                                             hasInitializedClips.current = true;
                                                         }
                                                     }}
                                                 />
-                                                <video
-                                                    ref={primaryRefB}
-                                                    // src controlled by useTimelineEngine
-                                                    className="absolute inset-0 w-full h-full object-cover transition-opacity duration-75"
-                                                    style={{ zIndex: 1, opacity: 1 }}
-                                                    preload="auto"
-                                                    muted={true}
-                                                />
+                                                {/* Overlay Videos (Layer > 0) */}
+                                                {videoClips
+                                                    .filter(c => (c.layer || 0) > 0)
+                                                    .map(clip => {
+                                                        const src = clip.src?.startsWith('http')
+                                                            ? `/api/proxy-video?url=${encodeURIComponent(clip.src)}`
+                                                            : clip.src;
 
-                                                {/* Other Layers (1+) */}
-                                                {activeLayers.filter(l => l > 0).map(layerIndex => (
-                                                    <video
-                                                        key={layerIndex}
-                                                        ref={el => {
-                                                            if (!videoRefs.current) videoRefs.current = {};
-                                                            videoRefs.current[layerIndex] = el;
-                                                        }}
-                                                        src={videoUrl || ''}
-                                                        className="absolute inset-0 w-full h-full object-cover transition-opacity duration-75"
-                                                        style={{ zIndex: layerIndex + 1, opacity: 0 }}
-                                                        preload="auto"
-                                                        muted={true} // Layer 1+ always muted overlay?
-                                                    />
-                                                ))}
+                                                        return (
+                                                            <video
+                                                                key={clip.id}
+                                                                ref={el => {
+                                                                    if (el) hiddenVideoRefs.current.set(clip.id, el);
+                                                                    else hiddenVideoRefs.current.delete(clip.id);
+                                                                }}
+                                                                src={src}
+                                                                preload="auto"
+                                                                muted={false} // Mixing Audio
+                                                            />
+                                                        );
+                                                    })
+                                                }
+                                            </div>
+
+                                            {/* OVERLAY INTERACTION LAYER (Transparent Divs) */}
+                                            <div className="absolute inset-0 z-[20]">
+                                                {videoClips
+                                                    .filter(c => (c.layer || 0) > 0 && playbackTime >= c.startTime && playbackTime < c.endTime)
+                                                    .map(clip => {
+                                                        const position = clip.previewPosition || { x: 50, y: 50 };
+                                                        const scale = clip.scale || 1;
+                                                        const isSelected = draggingOverlayId === clip.id || resizingOverlayId === clip.id;
+
+                                                        // Helper to get Aspect Ratio
+                                                        // We don't have exact aspect here easily without state, 
+                                                        // but we can default to 16:9 or 9:16 based on assumptions or lookups.
+                                                        // For interaction, exact box match isn't 100% critical as long as it's sizable.
+                                                        // Let's assume Landscape (16:9) for overlay default or use a square-ish box that scales.
+                                                        // Better: Retrieve aspect from hiddenVideoRef if possible?
+                                                        // Complex in render. Let's use a standard box that scales.
+
+                                                        return (
+                                                            <div
+                                                                key={clip.id}
+                                                                onPointerDown={(e) => handleOverlayPointerDown(e, clip.id, 'move')}
+                                                                onPointerMove={handleOverlayPointerMove}
+                                                                onPointerUp={handleOverlayPointerUp}
+                                                                className={`absolute group bg-transparent`}
+                                                                style={{
+                                                                    left: `${position.x}%`,
+                                                                    top: `${position.y}%`,
+                                                                    transform: `translate(-50%, -50%) scale(${scale})`,
+                                                                    width: '100%', // Base width, transforms scale it
+                                                                    height: 'auto',
+                                                                    aspectRatio: '16/9', // Assumed aspect for hit box.
+                                                                    zIndex: (clip.layer || 0) + 10,
+                                                                    maxWidth: '100%'
+                                                                }}
+                                                            >
+                                                                {/* Visual Border Box (Only visible on hover/drag) */}
+                                                                <div className={`w-full h-full border-2 border-dashed transition-colors ${isSelected ? 'border-yellow-400 bg-white/5' : 'border-transparent hover:border-blue-400'}`}>
+
+                                                                    {/* Resize Handle (Bottom Right) */}
+                                                                    <div
+                                                                        className={`absolute -bottom-3 -right-3 w-6 h-6 bg-white rounded-full shadow-md cursor-nwse-resize flex items-center justify-center transition-opacity ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                                                                        onPointerDown={(e) => handleOverlayPointerDown(e, clip.id, 'resize')}
+                                                                    >
+                                                                        <div className="w-2 h-2 bg-indigo-600 rounded-full" />
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })
+                                                }
                                             </div>
 
                                             {/* Click to Toggle Play/Pause */}
@@ -2623,12 +2782,16 @@ export default function SubtitleMakerPage() {
                                 <TimelineEditor
                                     duration={duration}
                                     subtitles={subtitles}
-                                    onUpdateSubtitle={updateSubtitlesWithHistory}
+                                    onUpdateSubtitle={(id, start, end) => {
+                                        updateSubtitlesWithHistory(prev => prev.map(s =>
+                                            s.id === id ? { ...s, startTime: start, endTime: end } : s
+                                        ));
+                                    }}
                                     onSeek={handleTimelineSeek}
                                     excludedSubtitleIds={excludedSubtitleIds}
                                     onToggleExclude={handleToggleExclude}
-                                    videoElement={videoRef.current}
-                                    currentTime={currentTime}
+                                    videoElement={mainVideoElement}
+                                    currentTime={playbackTime} // Drive with verified playbackTime
                                     videoFileName={videoFile?.name}
                                     isPlaying={isPlaying}
                                     onPlayPause={togglePlay}
@@ -2647,6 +2810,7 @@ export default function SubtitleMakerPage() {
                                         }
                                     }}
                                     isCutMode={isCutMode}
+                                    onDropFile={handleTimelineDrop}
                                 />
                             </div>
                         )}

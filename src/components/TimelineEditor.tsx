@@ -20,6 +20,8 @@ export interface VideoClip {
     src?: string;
     name?: string;
     type?: string;
+    frames?: string[]; // Per-clip frame thumbnails
+    previewPosition?: { x: number; y: number }; // Position in preview (percentage)
 }
 
 export interface AudioClip {
@@ -203,6 +205,17 @@ export default function TimelineEditor({
         setVideoClips(externalClips);
     }, [externalClips]);
 
+    // Clear frame thumbnails when clips change significantly (forces re-extraction for multi-clip)
+    const prevClipIdsRef = useRef<string>('');
+    useEffect(() => {
+        const newClipIds = externalClips.map(c => c.id).join(',');
+        if (prevClipIdsRef.current && prevClipIdsRef.current !== newClipIds && frameThumbnails.length > 0) {
+            console.log('[TimelineEditor] Clips changed, clearing frame thumbnails for re-extraction');
+            setFrameThumbnails([]);
+        }
+        prevClipIdsRef.current = newClipIds;
+    }, [externalClips, frameThumbnails.length]);
+
     useEffect(() => {
         setLocalAudioClips(audioClips);
     }, [audioClips]);
@@ -376,158 +389,105 @@ export default function TimelineEditor({
     // Total timeline width
     const totalWidth = Math.max((duration + 5) * pxPerSec, window.innerWidth);
 
-    // Multi-clip Frame Extraction
-    const generateFrameThumbnails = useCallback(async () => {
-        if (!videoElement || duration <= 0 || videoClips.length === 0) return;
+    // Multi-clip Frame Extraction (Per Clip)
+    const extractFramesForClip = useCallback(async (clip: VideoClip) => {
+        console.log('[FrameDebug] Extractor called for:', clip.id, clip.src);
+        if (!clip.src) return null;
 
-        // Prevent double run if already running (check ref for immediate feedback)
-        if (isGeneratingFramesRef.current) return;
+        // Setup minimal video/canvas for extraction
+        const video = document.createElement('video');
+        video.crossOrigin = 'anonymous';
+        video.muted = true;
+        // Use proxy for CORS
+        video.src = clip.src.startsWith('http')
+            ? `/api/proxy-video?url=${encodeURIComponent(clip.src)}`
+            : clip.src;
 
-        setIsGeneratingFrames(true);
-        isGeneratingFramesRef.current = true; // Sync Ref
-        onFrameExtractionChange?.(true);
-
-        const canvasHeight = 480;
-        const canvasWidth = Math.round(canvasHeight * (16 / 9));
-        const canvas = document.createElement('canvas');
-        canvas.width = canvasWidth;
-        canvas.height = canvasHeight;
-        const ctx = canvas.getContext('2d', { alpha: false });
-
-        if (!ctx) {
-            setIsGeneratingFrames(false);
-            isGeneratingFramesRef.current = false; // Reset Ref
-            onFrameExtractionChange?.(false);
-            return;
-        }
-
-        const thumbnails: string[] = [];
-        const maxFrames = Math.min(Math.ceil(duration), 30);
-        const interval = duration / maxFrames;
-
-        // Helper to load video source
-        const loadSource = async (src: string, videoEl: HTMLVideoElement): Promise<void> => {
-            return new Promise((resolve, reject) => {
-                const isRemote = src.startsWith('http');
-
-                // IMPORTANT: Set crossOrigin BEFORE src for reliable CORS handling
-                videoEl.crossOrigin = 'anonymous';
-                videoEl.preload = 'auto'; // Force load
-
-                // Add timestamp to prevent caching issues with CORS
-                videoEl.src = isRemote
-                    ? `/api/proxy-video?url=${encodeURIComponent(src)}&t=${Date.now()}`
-                    : src;
-
-                videoEl.muted = true;
-
-                // Use canplay as it might be safer than onloadedmetadata for seeking readiness
-                videoEl.onloadedmetadata = () => resolve();
-                videoEl.onerror = (e) => {
-                    console.error('Video Load Error', e);
-                    reject(e);
-                };
-
-                // Explicitly call load()
-                videoEl.load();
-            });
-        };
-
-        const extractionVideo = document.createElement('video');
-
-        // Sort clips by startTime (Layer 0)
-        const sortedClips = [...videoClips]
-            .filter(c => c.layer === 0 || c.layer === undefined)
-            .sort((a, b) => a.startTime - b.startTime);
-
-        // Optimized Frame Extraction: Batch by Clip to avoid reloading source
-        const framesToExtract: { time: number; index: number; clip: VideoClip }[] = [];
-
-        // 1. Identify which clip is needed for each frame interval
-        for (let i = 0; i < maxFrames; i++) {
-            const time = i * interval;
-            const activeClip = sortedClips.find(c => time >= c.startTime && time < c.endTime);
-            if (activeClip && activeClip.src) {
-                framesToExtract.push({ time, index: i, clip: activeClip });
-            } else {
-                thumbnails[i] = ''; // Placeholder for empty space
-            }
-        }
-
-        // 2. Group frames by Clip ID
-        const clipsToProcess = new Map<string, typeof framesToExtract>();
-        framesToExtract.forEach(item => {
-            const list = clipsToProcess.get(item.clip.id) || [];
-            list.push(item);
-            clipsToProcess.set(item.clip.id, list);
+        await new Promise<void>((resolve, reject) => {
+            video.onloadedmetadata = () => resolve();
+            video.onerror = () => resolve(); // Continue even if load fails to avoid blocking
+            video.load();
         });
 
-        // 3. Process each clip ONCE
-        for (const [clipId, frames] of clipsToProcess.entries()) {
-            if (frames.length === 0) continue;
-            const clip = frames[0].clip;
+        // If metadata failed to load properly
+        if (video.videoWidth === 0) return null;
 
-            try {
-                // Load source ONLY ONCE per clip
-                await loadSource(clip.src!, extractionVideo);
+        const duration = clip.sourceEnd - clip.sourceStart;
+        if (duration <= 0) return null;
 
-                // Extract all frames for this clip
-                for (const frame of frames) {
-                    if (!isGeneratingFramesRef.current) break; // Check abort
+        // Extract frames for the USED duration (sourceStart to sourceEnd)
+        const frameCount = 10; // Fixed number of frames for consistent thumbnails
+        const extractedFrames: string[] = [];
 
-                    const offset = frame.time - clip.startTime;
-                    const targetTime = clip.sourceStart + offset;
+        const canvas = document.createElement('canvas'); // Use full resolution or smaller?
+        canvas.width = 160;
+        canvas.height = 90;
+        const ctx = canvas.getContext('2d', { alpha: false });
+        if (!ctx) return null;
 
-                    extractionVideo.currentTime = targetTime;
-                    await new Promise<void>(resolve => {
-                        const seekHandler = () => {
-                            ctx.drawImage(extractionVideo, 0, 0, canvas.width, canvas.height);
-                            thumbnails[frame.index] = canvas.toDataURL('image/jpeg', 0.6);
-                            resolve();
-                        };
-                        extractionVideo.addEventListener('seeked', seekHandler, { once: true });
-                        // Timeout fallback
-                        setTimeout(resolve, 3000);
-                    });
+        for (let i = 0; i < frameCount; i++) {
+            const offset = (i / frameCount) * duration;
+            const targetTime = clip.sourceStart + offset;
 
-                    // Tiny yield to prevent UI freeze and allow network for main player
-                    await new Promise(r => setTimeout(r, 50));
-                }
-            } catch (e) {
-                console.error(`Failed to extract frames for clip ${clip.id}`, e);
-                // Fill failed frames with black
-                frames.forEach(f => {
-                    ctx.fillStyle = '#000000';
-                    ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    thumbnails[f.index] = canvas.toDataURL('image/jpeg', 0.1);
-                });
-            }
+            video.currentTime = targetTime;
+            await new Promise<void>(resolve => {
+                const onSeek = () => {
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    extractedFrames.push(canvas.toDataURL('image/jpeg', 0.5));
+                    resolve();
+                };
+                video.addEventListener('seeked', onSeek, { once: true });
+                // Fallback timeout
+                setTimeout(resolve, 500);
+            });
         }
 
-        // 4. Fallback for any missing indices (should be covered, but safely fill)
-        for (let i = 0; i < maxFrames; i++) {
-            if (thumbnails[i] === undefined) {
-                ctx.fillStyle = '#000000';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                thumbnails[i] = canvas.toDataURL('image/jpeg', 0.1);
-            }
-        }
+        return extractedFrames;
+    }, []);
 
-
-        setFrameThumbnails(thumbnails);
-        setIsGeneratingFrames(false);
-        isGeneratingFramesRef.current = false; // Reset Ref
-        onFrameExtractionChange?.(false);
-    }, [videoElement, duration, videoClips, onFrameExtractionChange]);
-
+    // Effect to trigger extraction for clips that don't have frames yet
     useEffect(() => {
-        if (videoElement && duration > 0 && frameThumbnails.length === 0) {
-            const timer = setTimeout(() => {
-                generateFrameThumbnails();
-            }, 500);
-            return () => clearTimeout(timer);
-        }
-    }, [videoElement, duration, generateFrameThumbnails, frameThumbnails.length]);
+        if (videoClips.length === 0) return;
+
+        const processClips = async () => {
+            let hasGlobalChanges = false;
+            const updatedClips = [...videoClips];
+            let madeChanges = false;
+
+            for (let i = 0; i < updatedClips.length; i++) {
+                const clip = updatedClips[i];
+                // Extract if: has src AND (no frames OR frames empty)
+                if (clip.src && (!clip.frames || clip.frames.length === 0)) {
+                    if (isGeneratingFramesRef.current) continue;
+
+                    console.log('[FrameExtract] Extracting for clip:', clip.id);
+                    isGeneratingFramesRef.current = true;
+                    onFrameExtractionChange?.(true);
+
+                    try {
+                        const frames = await extractFramesForClip(clip);
+                        if (frames && frames.length > 0) {
+                            updatedClips[i] = { ...clip, frames };
+                            madeChanges = true;
+                        }
+                    } catch (e) {
+                        console.error('[FrameExtract] Failed for clip:', clip.name, e);
+                    } finally {
+                        isGeneratingFramesRef.current = false;
+                        onFrameExtractionChange?.(false);
+                    }
+                }
+            }
+
+            if (madeChanges) {
+                onUpdateVideoClips(updatedClips);
+            }
+        };
+
+        const timer = setTimeout(processClips, 1000);
+        return () => clearTimeout(timer);
+
+    }, [videoClips, extractFramesForClip, onUpdateVideoClips, onFrameExtractionChange]);
 
     // Audio Waveform Extraction (Stereo L/R)
     const generateAudioWaveform = useCallback(async () => {

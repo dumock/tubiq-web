@@ -927,7 +927,29 @@ export default function StoryboardPage() {
     };
 
     // --- AI Auto Edit Logic ---
-    const handleAutoEdit = () => {
+    // Helper function to get video duration from URL
+    const getVideoDuration = (url: string): Promise<number> => {
+        return new Promise((resolve) => {
+            const video = document.createElement('video');
+            video.preload = 'metadata';
+            video.onloadedmetadata = () => {
+                resolve(video.duration || 6); // Default to 6 seconds if metadata fails
+                video.remove();
+            };
+            video.onerror = () => {
+                resolve(6); // Default to 6 seconds on error
+                video.remove();
+            };
+            // Set a timeout in case metadata never loads
+            setTimeout(() => {
+                if (video.parentNode) video.remove();
+                resolve(6);
+            }, 5000);
+            video.src = url;
+        });
+    };
+
+    const handleAutoEdit = async () => {
         // 1. Gather all generated videos
         const videoScenes = scenes.filter(s => s.videoUrl && s.videoStatus === 'complete');
 
@@ -936,36 +958,53 @@ export default function StoryboardPage() {
             return;
         }
 
-        // 2. Construct Video Clips (Sequential)
-        const clips = videoScenes.map((s, index) => ({
-            id: crypto.randomUUID(),
-            src: s.videoUrl!,
-            type: 'video',
-            name: `Scene ${index + 1}`,
-            startTime: index * 4, // Corrected from startOffset
-            endTime: (index * 4) + 4, // Corrected from duration
-            sourceStart: 0,       // Added
-            sourceEnd: 4,         // Added
-            layer: 0,
-            trackId: 'main-track'
-        }));
+        // 2. Fetch actual video durations
+        const durations = await Promise.all(
+            videoScenes.map(s => getVideoDuration(s.videoUrl!))
+        );
 
-        // 3. Construct Subtitles from Scripts
-        const subtitles = videoScenes.map((s, index) => ({
-            id: crypto.randomUUID(),
-            text: s.script,
-            startTime: index * 4,      // Corrected from start
-            endTime: (index * 4) + 4   // Corrected from end
-        }));
+        // 3. Construct Video Clips (Sequential with actual durations)
+        let currentTime = 0;
+        const clips = videoScenes.map((s, index) => {
+            const duration = durations[index];
+            const clip = {
+                id: crypto.randomUUID(),
+                src: s.videoUrl!,
+                type: 'video',
+                name: `Scene ${index + 1}`,
+                startTime: currentTime,
+                endTime: currentTime + duration,
+                sourceStart: 0,
+                sourceEnd: duration,
+                layer: 0,
+                trackId: 'main-track'
+            };
+            currentTime += duration;
+            return clip;
+        });
 
-        // 4. Save to LocalStorage
+        // 4. Construct Subtitles from Scripts (matched to clip times)
+        currentTime = 0;
+        const subtitles = videoScenes.map((s, index) => {
+            const duration = durations[index];
+            const subtitle = {
+                id: crypto.randomUUID(),
+                text: s.script,
+                startTime: currentTime,
+                endTime: currentTime + duration
+            };
+            currentTime += duration;
+            return subtitle;
+        });
+
+        // 5. Save to LocalStorage
         const projectData = {
             videoClips: clips,
             subtitles: subtitles
         };
         localStorage.setItem('tubiq-edit-project', JSON.stringify(projectData));
 
-        // 5. Redirect to Subtitle Maker
+        // 6. Redirect to Subtitle Maker
         router.push('/subtitle-maker');
     };
 

@@ -44,15 +44,42 @@ export const VideoClipItem = memo(({
     // Memoize frame slots calculation to prevent recalc on every drag move if source params haven't changed
     const frameSlots = React.useMemo(() => {
         const slotCount = Math.ceil(clipWidth / slotWidth);
+        const clipFrames = clip.frames || [];
+
+        // If no frames yet, return empty array (will show placeholder color)
+        if (clipFrames.length === 0 && frameThumbnails.length === 0) return [];
+
+        // Fallback to global frameThumbnails if clip.frames not ready (backward compatibility/transition)
+        const sourceFrames = clipFrames.length > 0 ? clipFrames : frameThumbnails;
+        const sourceIsGlobal = clipFrames.length === 0;
+
         return Array.from({ length: slotCount }, (_, i) => {
             const offsetInClip = (i * slotWidth) / pxPerSec; // time offset from start of clip
-            const sourceTime = clip.sourceStart + offsetInClip;
 
-            // Allow bounds check to be slightly loose to catch the last frame
-            const frameIndex = Math.floor((sourceTime / containerDuration) * frameThumbnails.length);
-            return frameThumbnails[Math.min(frameIndex, frameThumbnails.length - 1)];
+            if (sourceIsGlobal) {
+                // OLD LOGIC: Use global timeline time (fallback)
+                const timelineTime = clip.startTime + offsetInClip;
+                const frameIndex = Math.floor((timelineTime / containerDuration) * sourceFrames.length);
+                return sourceFrames[Math.min(Math.max(0, frameIndex), sourceFrames.length - 1)] || '';
+            } else {
+                // NEW LOGIC: Use clip internal duration (source-based indexing)
+                // Frame array covers clip.sourceStart to clip.sourceEnd
+                const clipDuration = clip.sourceEnd - clip.sourceStart;
+                if (clipDuration <= 0) return '';
+
+                // Map offset (0 to duration) to frame index
+                // Note: We might need to consider source start if frames are extracted only for the USED portion?
+                // But usually we extract for the full duration or at least the relevant part.
+                // Assuming clip.frames covers the currently defined [sourceStart, sourceEnd] range?
+                // Actually, let's assume frames represent the visible range or the full source?
+                // Let's implement extraction for the *used duration* first.
+
+                // If frames extracted for duration:
+                const frameIndex = Math.floor((offsetInClip / clipDuration) * sourceFrames.length);
+                return sourceFrames[Math.min(Math.max(0, frameIndex), sourceFrames.length - 1)] || '';
+            }
         });
-    }, [clipWidth, slotWidth, pxPerSec, clip.sourceStart, containerDuration, frameThumbnails]);
+    }, [clipWidth, slotWidth, pxPerSec, clip.startTime, clip.sourceStart, clip.sourceEnd, clip.frames, containerDuration, frameThumbnails]);
 
     return (
         <div
