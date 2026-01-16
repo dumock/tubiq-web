@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { X, Plus, Trash2, RotateCcw, Youtube, Bot, ShieldCheck, AlertCircle, Loader2, Sparkles, Share2, Wand2, Mic } from 'lucide-react';
+import { X, Plus, Trash2, RotateCcw, Youtube, Bot, ShieldCheck, AlertCircle, Loader2, Sparkles, Share2, Wand2, Mic, Zap } from 'lucide-react';
 import { useYouTubeApi } from '@/hooks/useYouTubeApi';
 import AppleToast from './AppleToast';
 
@@ -12,7 +12,7 @@ interface ApiConfigModalProps {
 
 export default function ApiConfigModal({ isOpen, onClose }: ApiConfigModalProps) {
     const { config, updateConfig, isLoading } = useYouTubeApi();
-    const [activeTab, setActiveTab] = useState<'youtube' | 'gemini' | 'openai' | 'tikhub' | 'fal' | 'voice'>('youtube');
+    const [activeTab, setActiveTab] = useState<'youtube' | 'gemini' | 'openai' | 'tikhub' | 'fal' | 'kei' | 'voice'>('youtube');
     const [newKey, setNewKey] = useState('');
     const [newBudget, setNewBudget] = useState<number>(10000);
     const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -141,68 +141,80 @@ export default function ApiConfigModal({ isOpen, onClose }: ApiConfigModalProps)
                     </button>
                 </div>
 
-                {/* Tabs */}
-                <div className="flex border-b border-gray-100 dark:border-zinc-800 px-6">
-                    <button
-                        onClick={() => { setActiveTab('youtube'); setTestResult(null); }}
-                        className={`flex items-center gap-2 px-4 py-3 text-sm font-bold border-b-2 transition-colors ${activeTab === 'youtube'
-                            ? 'border-indigo-600 text-indigo-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-                            }`}
-                    >
-                        <Youtube className="h-4 w-4" />
-                        YouTube API
-                    </button>
-                    <button
-                        onClick={() => { setActiveTab('gemini'); setTestResult(null); }}
-                        className={`flex items-center gap-2 px-4 py-3 text-sm font-bold border-b-2 transition-colors ${activeTab === 'gemini'
-                            ? 'border-indigo-600 text-indigo-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-                            }`}
-                    >
-                        <Bot className="h-4 w-4" />
-                        Gemini API
-                    </button>
-                    <button
-                        onClick={() => { setActiveTab('openai'); setTestResult(null); }}
-                        className={`flex items-center gap-2 px-4 py-3 text-sm font-bold border-b-2 transition-colors ${activeTab === 'openai'
-                            ? 'border-indigo-600 text-indigo-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-                            }`}
-                    >
-                        <Sparkles className="h-4 w-4" />
-                        OpenAI API
-                    </button>
-                    <button
-                        onClick={() => { setActiveTab('tikhub'); setTestResult(null); }}
-                        className={`flex items-center gap-2 px-4 py-3 text-sm font-bold border-b-2 transition-colors ${activeTab === 'tikhub'
-                            ? 'border-indigo-600 text-indigo-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-                            }`}
-                    >
-                        <Share2 className="h-4 w-4" />
-                        TikHub API
-                    </button>
-                    <button
-                        onClick={() => { setActiveTab('fal'); setTestResult(null); }}
-                        className={`flex items-center gap-2 px-4 py-3 text-sm font-bold border-b-2 transition-colors ${activeTab === 'fal'
-                            ? 'border-indigo-600 text-indigo-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-                            }`}
-                    >
-                        <Wand2 className="h-4 w-4" />
-                        FAL API
-                    </button>
-                    <button
-                        onClick={() => { setActiveTab('voice'); setTestResult(null); }}
-                        className={`flex items-center gap-2 px-4 py-3 text-sm font-bold border-b-2 transition-colors ${activeTab === 'voice'
-                            ? 'border-indigo-600 text-indigo-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-                            }`}
-                    >
-                        <Mic className="h-4 w-4" />
-                        Voice API
-                    </button>
+                {/* Tabs - Scrollable */}
+                <div className="flex overflow-x-auto border-b border-gray-100 dark:border-zinc-800 px-4 scrollbar-hide">
+                    <div className="flex min-w-max">
+                        <button
+                            onClick={() => { setActiveTab('youtube'); setTestResult(null); }}
+                            className={`flex items-center gap-1.5 px-3 py-3 text-xs font-bold border-b-2 transition-colors whitespace-nowrap ${activeTab === 'youtube'
+                                ? 'border-indigo-600 text-indigo-600'
+                                : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                                }`}
+                        >
+                            <Youtube className="h-4 w-4" />
+                            YouTube
+                        </button>
+                        <button
+                            onClick={() => { setActiveTab('gemini'); setTestResult(null); }}
+                            className={`flex items-center gap-1.5 px-3 py-3 text-xs font-bold border-b-2 transition-colors whitespace-nowrap ${activeTab === 'gemini'
+                                ? 'border-indigo-600 text-indigo-600'
+                                : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                                }`}
+                        >
+                            <Bot className="h-4 w-4" />
+                            Gemini
+                        </button>
+                        <button
+                            onClick={() => { setActiveTab('openai'); setTestResult(null); }}
+                            className={`flex items-center gap-1.5 px-3 py-3 text-xs font-bold border-b-2 transition-colors whitespace-nowrap ${activeTab === 'openai'
+                                ? 'border-indigo-600 text-indigo-600'
+                                : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                                }`}
+                        >
+                            <Sparkles className="h-4 w-4" />
+                            OpenAI
+                        </button>
+                        <button
+                            onClick={() => { setActiveTab('tikhub'); setTestResult(null); }}
+                            className={`flex items-center gap-1.5 px-3 py-3 text-xs font-bold border-b-2 transition-colors whitespace-nowrap ${activeTab === 'tikhub'
+                                ? 'border-indigo-600 text-indigo-600'
+                                : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                                }`}
+                        >
+                            <Share2 className="h-4 w-4" />
+                            TikHub
+                        </button>
+                        <button
+                            onClick={() => { setActiveTab('fal'); setTestResult(null); }}
+                            className={`flex items-center gap-1.5 px-3 py-3 text-xs font-bold border-b-2 transition-colors whitespace-nowrap ${activeTab === 'fal'
+                                ? 'border-indigo-600 text-indigo-600'
+                                : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                                }`}
+                        >
+                            <Wand2 className="h-4 w-4" />
+                            FAL
+                        </button>
+                        <button
+                            onClick={() => { setActiveTab('kei'); setTestResult(null); }}
+                            className={`flex items-center gap-1.5 px-3 py-3 text-xs font-bold border-b-2 transition-colors whitespace-nowrap ${activeTab === 'kei'
+                                ? 'border-indigo-600 text-indigo-600'
+                                : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                                }`}
+                        >
+                            <Zap className="h-4 w-4" />
+                            Kei
+                        </button>
+                        <button
+                            onClick={() => { setActiveTab('voice'); setTestResult(null); }}
+                            className={`flex items-center gap-1.5 px-3 py-3 text-xs font-bold border-b-2 transition-colors whitespace-nowrap ${activeTab === 'voice'
+                                ? 'border-indigo-600 text-indigo-600'
+                                : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                                }`}
+                        >
+                            <Mic className="h-4 w-4" />
+                            Voice
+                        </button>
+                    </div>
                 </div>
 
                 <div className="p-6 overflow-y-auto custom-scrollbar">
@@ -443,6 +455,54 @@ export default function ApiConfigModal({ isOpen, onClose }: ApiConfigModalProps)
                         </div>
                     )}
 
+                    {/* Kei API Test Integration Button */}
+                    {activeTab === 'kei' && (
+                        <div className="mb-6">
+                            <div className="mb-3 p-3 rounded-lg bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-100 dark:border-cyan-800">
+                                <p className="text-xs text-cyan-700 dark:text-cyan-300">
+                                    ⚡ 나노바나나프로, 베오3.1패스트, 제트이미지, 그록 이미지/영상 생성 등에 사용됩니다.
+                                    <a href="https://kei.ai" target="_blank" rel="noopener noreferrer" className="underline font-bold">kei.ai</a>에서 API Key 발급
+                                </p>
+                            </div>
+                            <button
+                                onClick={async () => {
+                                    setTestResult(null);
+                                    try {
+                                        // Get active Kei key from current config
+                                        const keiConfig = config.kei || { keys: [], rotationEnabled: false };
+                                        const activeKey = keiConfig.keys.find((k: any) => k.active);
+
+                                        const headers: Record<string, string> = {};
+                                        if (activeKey) {
+                                            headers['X-Kei-Api-Key'] = activeKey.key;
+                                        }
+
+                                        const res = await fetch('/api/integrations/kei/test', {
+                                            method: 'POST',
+                                            headers
+                                        });
+                                        const data = await res.json();
+                                        if (data.ok) {
+                                            setTestResult({ success: true, message: `테스트 성공: ${data.message}` });
+                                        } else {
+                                            setTestResult({ success: false, message: `테스트 실패: ${data.message}` });
+                                        }
+                                    } catch (e) {
+                                        setTestResult({ success: false, message: '테스트 오류 발생' });
+                                    }
+                                }}
+                                className="h-10 px-4 rounded-lg bg-white border border-gray-200 text-gray-700 font-medium hover:bg-gray-50 dark:bg-zinc-800 dark:border-zinc-700 dark:text-gray-300 dark:hover:bg-zinc-700 transition-colors text-sm"
+                            >
+                                연동 테스트
+                            </button>
+                            {testResult && (
+                                <p className={`mt-2 text-sm ${testResult.success ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                                    {testResult.message}
+                                </p>
+                            )}
+                        </div>
+                    )}
+
                     {/* Voice API Settings Section */}
                     {activeTab === 'voice' && (
                         <div className="mb-6 space-y-6">
@@ -529,32 +589,34 @@ export default function ApiConfigModal({ isOpen, onClose }: ApiConfigModalProps)
                         </div>
                     )}
 
+                    {/* YouTube Only: Rotation Toggle Card */}
+                    {activeTab === 'youtube' && (
+                        <div className="mb-6 flex items-center justify-between rounded-2xl bg-gray-50 dark:bg-zinc-800/50 p-4 border border-gray-100 dark:border-zinc-800">
+                            <div className="flex items-center gap-3">
+                                <div className={`p-2 rounded-lg ${currentTabConfig.rotationEnabled ? 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/40 dark:text-indigo-400' : 'bg-gray-200 text-gray-500 dark:bg-zinc-700'}`}>
+                                    <RotateCcw className={`h-5 w-5 ${currentTabConfig.rotationEnabled ? 'animate-spin-slow' : ''}`} />
+                                </div>
+                                <div>
+                                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">API 키 자동 회전 모드</h3>
+                                    <p className="text-xs text-gray-500 dark:text-gray-400">할당량 초과 시 자동으로 다음 키를 사용합니다</p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={toggleRotation}
+                                className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${currentTabConfig.rotationEnabled ? 'bg-indigo-600' : 'bg-gray-200 dark:bg-zinc-700'
+                                    }`}
+                            >
+                                <span
+                                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${currentTabConfig.rotationEnabled ? 'translate-x-5' : 'translate-x-0'
+                                        }`}
+                                />
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Add Key Form - For all tabs except voice */}
                     {activeTab !== 'voice' && (
                         <>
-                            {/* Rotation Toggle Card */}
-                            <div className="mb-6 flex items-center justify-between rounded-2xl bg-gray-50 dark:bg-zinc-800/50 p-4 border border-gray-100 dark:border-zinc-800">
-                                <div className="flex items-center gap-3">
-                                    <div className={`p-2 rounded-lg ${currentTabConfig.rotationEnabled ? 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/40 dark:text-indigo-400' : 'bg-gray-200 text-gray-500 dark:bg-zinc-700'}`}>
-                                        <RotateCcw className={`h-5 w-5 ${currentTabConfig.rotationEnabled ? 'animate-spin-slow' : ''}`} />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-sm font-bold text-gray-900 dark:text-white">API 키 자동 회전 모드</h3>
-                                        <p className="text-xs text-gray-500 dark:text-gray-400">할당량 초과 시 자동으로 다음 키를 사용합니다</p>
-                                    </div>
-                                </div>
-                                <button
-                                    onClick={toggleRotation}
-                                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${currentTabConfig.rotationEnabled ? 'bg-indigo-600' : 'bg-gray-200 dark:bg-zinc-700'
-                                        }`}
-                                >
-                                    <span
-                                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${currentTabConfig.rotationEnabled ? 'translate-x-5' : 'translate-x-0'
-                                            }`}
-                                    />
-                                </button>
-                            </div>
-
-                            {/* Add Key Form */}
                             <div className="mb-8 p-5 bg-white dark:bg-zinc-900 rounded-2xl border border-dashed border-gray-300 dark:border-zinc-700">
                                 <h3 className="text-sm font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
                                     <Plus className="h-4 w-4 text-indigo-600" /> 새 API 키 등록
@@ -667,6 +729,13 @@ export default function ApiConfigModal({ isOpen, onClose }: ApiConfigModalProps)
                 }
                 .animate-spin-slow {
                     animation: spin-slow 8s linear infinite;
+                }
+                .scrollbar-hide {
+                    -ms-overflow-style: none;
+                    scrollbar-width: none;
+                }
+                .scrollbar-hide::-webkit-scrollbar {
+                    display: none;
                 }
             `}</style>
         </div>

@@ -212,3 +212,40 @@ export async function getFalApiKey(request: Request): Promise<string | null> {
 
     return process.env.FAL_KEY || null;
 }
+
+/**
+ * 서버 사이드에서 Kei API 키를 결정하는 유틸리티
+ * 나노바나나프로, 베오3.1패스트, 제트이미지, 그록 이미지/영상 생성 등에 사용
+ */
+export async function getKeiApiKey(request: Request): Promise<string | null> {
+    const headerKey = request.headers.get('X-Kei-Api-Key');
+    if (headerKey) return headerKey;
+
+    try {
+        const supabase = getSupabaseServer(true);
+        const user = await getAuthenticatedUser(request, supabase);
+
+        if (user) {
+            const { data } = await supabase
+                .from('user_settings')
+                .select('setting_value')
+                .eq('user_id', user.id)
+                .eq('setting_key', 'api_config')
+                .single();
+
+            if (data?.setting_value) {
+                const config = data.setting_value as any;
+                const keiKeys = config.kei?.keys || [];
+                const activeKey = keiKeys.find((k: any) => k.active);
+
+                if (activeKey) {
+                    return activeKey.key;
+                }
+            }
+        }
+    } catch (e) {
+        console.error('[KeiServer] Failed to get key from DB', e);
+    }
+
+    return process.env.KEI_API_KEY || null;
+}

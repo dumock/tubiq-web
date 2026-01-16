@@ -1,0 +1,16 @@
+# AI 절대 접근 금지 (체함 방지)
+chrome-profiles/
+logs/
+tmp/
+.next/
+node_modules/
+dist/
+build/
+.git/
+*.mp4
+*.mov
+*.avi
+*.mp3
+package-lock.json
+yarn.lock
+*.log

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Search, Grid, List as ListIcon, RefreshCw, Film, Filter, X, HardDrive, Folder, CornerUpLeft, Trash2, CheckCircle2, UploadCloud } from 'lucide-react';
 import { Asset } from '@/types';
 import { YouTubeLogo } from '@/components/icons/YouTubeLogo';
@@ -9,8 +9,12 @@ interface QDriveSidebarProps {
     onClose?: () => void;
 }
 
+// Global URL cache (persists across re-renders and tab switches)
+const urlCache = new Map<string, { url: string; expires: number }>();
+const CACHE_DURATION = 55 * 60 * 1000; // 55 minutes (signed URLs valid for 1 hour)
+
 export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarProps) {
-    const [activeTab, setActiveTab] = useState<'qdrive' | 'youtube' | 'storage'>('qdrive');
+    const [activeTab, setActiveTab] = useState<'qdrive' | 'youtube' | 'storage'>('storage');
     const [assets, setAssets] = useState<Asset[]>([]);
     const [loading, setLoading] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
@@ -19,6 +23,7 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
     // Storage State
     const [currentPath, setCurrentPath] = useState<string[]>([]);
     const [storageItems, setStorageItems] = useState<any[]>([]);
+    const [storageUrls, setStorageUrls] = useState<Map<string, string>>(new Map());
     const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
 
     // Marquee Selection State
@@ -58,9 +63,21 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
         }
     };
 
-    const fetchStorageItems = async () => {
+    // Helper functions for file type detection
+    const isVideoFile = useCallback((name: string, mime?: string) => {
+        if (mime?.startsWith('video/')) return true;
+        return /\.(mp4|mov|webm|avi|mkv|m4v|3gp|wmv|flv|mts|ts|qt)$/i.test(name);
+    }, []);
+
+    const isImageFile = useCallback((name: string, mime?: string) => {
+        if (mime?.startsWith('image/')) return true;
+        return /\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|heic)$/i.test(name);
+    }, []);
+
+    // Batch fetch signed URLs for all media files
+    const fetchStorageItems = useCallback(async () => {
         setLoading(true);
-        setSelectedItems(new Set()); // Clear selection on path change
+        setSelectedItems(new Set());
         try {
             const path = currentPath.join('/');
             const { data, error } = await supabase
@@ -74,15 +91,61 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
 
             if (error) {
                 console.error('Error fetching storage:', error);
-            } else {
-                setStorageItems(data || []);
+                return;
             }
+
+            const items = data || [];
+            setStorageItems(items);
+
+            // Batch generate signed URLs for media files
+            const now = Date.now();
+            const urlMap = new Map<string, string>();
+            const urlPromises: Promise<void>[] = [];
+
+            for (const item of items) {
+                if (item.metadata) { // Not a folder
+                    const fullPath = [...currentPath, item.name].join('/');
+                    const isMedia = isVideoFile(item.name, item.metadata?.mimetype) ||
+                                   isImageFile(item.name, item.metadata?.mimetype);
+
+                    if (isMedia) {
+                        // Check cache first
+                        const cached = urlCache.get(fullPath);
+                        if (cached && cached.expires > now) {
+                            urlMap.set(item.name, cached.url);
+                        } else {
+                            // Queue URL generation
+                            urlPromises.push(
+                                (async () => {
+                                    const { data: urlData } = await supabase.storage
+                                        .from('videos')
+                                        .createSignedUrl(fullPath, 3600);
+                                    if (urlData?.signedUrl) {
+                                        urlCache.set(fullPath, {
+                                            url: urlData.signedUrl,
+                                            expires: now + CACHE_DURATION
+                                        });
+                                        urlMap.set(item.name, urlData.signedUrl);
+                                    }
+                                })()
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Wait for all URLs (parallel)
+            if (urlPromises.length > 0) {
+                await Promise.all(urlPromises);
+            }
+
+            setStorageUrls(new Map(urlMap));
         } catch (e) {
             console.error('Storage fetch error:', e);
         } finally {
             setLoading(false);
         }
-    };
+    }, [currentPath, isVideoFile, isImageFile]);
 
     useEffect(() => {
         if (activeTab === 'qdrive') {
@@ -90,7 +153,7 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
         } else if (activeTab === 'storage') {
             fetchStorageItems();
         }
-    }, [activeTab, currentPath]);
+    }, [activeTab, currentPath, fetchStorageItems]);
 
     const handleFolderClick = (folderName: string) => {
         setCurrentPath([...currentPath, folderName]);
@@ -122,7 +185,8 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
             if (error) {
                 alert('삭제 실패: ' + error.message);
             } else {
-                // Refresh
+                // Clear cache for deleted items
+                pathsToDelete.forEach(p => urlCache.delete(p));
                 fetchStorageItems();
             }
         } catch (e) {
@@ -142,7 +206,6 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
         if (files && files.length > 0) {
             handleFileUpload(files[0]);
         }
-        // Reset input
         e.target.value = '';
     };
 
@@ -151,33 +214,26 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
 
         setUploading(true);
         try {
-            // Path: currentPath + filename
-            // Handle duplicate names? Supabase auto-rejects duplicates usually unless UPSERT.
-            // Let's rely on standard upload (fails if exists).
             const fileName = file.name;
-            const fullPath = [...currentPath, fileName].join('/'); // No leading slash usually needed for bucket root if empty path
-
-            // Sanitize path if needed, but Supabase handles basic chars.
-            // Basic conflict check or just try upload
+            const fullPath = [...currentPath, fileName].join('/');
 
             const { data, error } = await supabase.storage
                 .from('videos')
                 .upload(fullPath, file, {
                     cacheControl: '3600',
-                    upsert: false // Prevent accidental overwrite
+                    upsert: false
                 });
 
             if (error) {
                 if (error.message.includes('The resource already exists')) {
                     alert('이미 같은 이름의 파일이 존재합니다.');
                 } else if (error.message.includes('The object exceeded the maximum allowed size')) {
-                    alert('파일 크기가 제한(현재 50MB)을 초과했습니다. Supabase 대시보드 Storage 설정에서 용량 제한을 늘려주세요.');
+                    alert('파일 크기가 제한(현재 50MB)을 초과했습니다.');
                 } else {
                     alert('업로드 실패: ' + error.message);
                 }
             } else {
-                // Success
-                fetchStorageItems(); // Refresh list
+                fetchStorageItems();
             }
         } catch (e: any) {
             console.error('Upload error:', e);
@@ -189,7 +245,6 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
 
     // --- Drop Logic for Upload ---
     const handleDragOver = (e: React.DragEvent) => {
-        // Allow drop
         e.preventDefault();
         e.stopPropagation();
     };
@@ -202,8 +257,6 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
 
         const files = e.dataTransfer.files;
         if (files && files.length > 0) {
-            // Upload first file for now, or loop for multiple
-            // Let's support single file for simplicity, or iterate
             if (files.length > 1) {
                 if (!confirm(`Total ${files.length} files. Upload all?`)) return;
             }
@@ -222,15 +275,9 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
     // --- Marquee Selection Logic ---
     const handleMouseDown = (e: React.MouseEvent) => {
         if (activeTab !== 'storage') return;
-        // If clicking on a button or scrollbar, ignore
         if ((e.target as HTMLElement).closest('button')) return;
 
-        // If ctrl key is pressed, we don't clear selection? standard behavior
         if (!e.ctrlKey && !e.shiftKey) {
-            // If clicking on empty space, clear. items stop propagation usually.
-            // But here items are part of container.
-            // We'll let item click handler handle item selection logic.
-            // If we start dragging from background, clear selection unless shift/ctrl.
             if (!(e.target as HTMLElement).closest('.storage-item')) {
                 setSelectedItems(new Set());
             }
@@ -242,7 +289,7 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
         const rect = container.getBoundingClientRect();
         startPosRef.current = {
             x: e.clientX - rect.left,
-            y: e.clientY - rect.top + container.scrollTop // Adjust for scroll
+            y: e.clientY - rect.top + container.scrollTop
         };
         setIsSelecting(true);
         setSelectionBox(null);
@@ -268,18 +315,11 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
 
         setSelectionBox(newBox);
 
-        // Simple intersection check
-        // Ideally we select items that intersect with the box
-        // This requires knowing item positions.
-        // We can do this on MouseUp to save perf, or throttle.
-        // For visual feedback, we need it now.
-        // Let's rely on standard logic: find all .storage-item elements
         const items = container.querySelectorAll('.storage-item');
-        const newSelected = new Set(e.ctrlKey ? selectedItems : []); // Keep existing if ctrl
+        const newSelected = new Set(e.ctrlKey ? selectedItems : []);
 
         items.forEach((item) => {
             const itemRect = (item as HTMLElement).getBoundingClientRect();
-            // Convert itemRect to relative to container
             const itemRelative = {
                 left: itemRect.left - rect.left,
                 top: itemRect.top - rect.top + container.scrollTop,
@@ -287,7 +327,6 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                 height: itemRect.height
             };
 
-            // Intersection
             if (
                 newBox.x < itemRelative.left + itemRelative.width &&
                 newBox.x + newBox.w > itemRelative.left &&
@@ -300,8 +339,7 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
         });
         setSelectedItems(newSelected);
 
-        // Auto-scroll logic
-        const scrollThreshold = 50; // px
+        const scrollThreshold = 50;
         const scrollSpeed = 10;
         const relativeY = e.clientY - rect.top;
 
@@ -309,22 +347,12 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
         scrollIntervalRef.current = null;
 
         if (relativeY < scrollThreshold) {
-            // Scroll Up
             scrollIntervalRef.current = setInterval(() => {
-                if (container) {
-                    container.scrollTop -= scrollSpeed;
-                    // Trigger mouse move logic again manually? 
-                    // Or just rely on next mouse move. 
-                    // Actually, if we scroll, we need to update selection box relative coords if mouse doesn't move.
-                    // But simplified: just scroll. User usually moves mouse.
-                }
+                if (container) container.scrollTop -= scrollSpeed;
             }, 16);
         } else if (relativeY > rect.height - scrollThreshold) {
-            // Scroll Down
             scrollIntervalRef.current = setInterval(() => {
-                if (container) {
-                    container.scrollTop += scrollSpeed;
-                }
+                if (container) container.scrollTop += scrollSpeed;
             }, 16);
         }
     };
@@ -349,18 +377,6 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
         setSelectedItems(newSet);
     };
 
-    // Helper to identify likely video file
-    const isVideoFile = (name: string, mime?: string) => {
-        if (mime?.startsWith('video/')) return true;
-        return /\.(mp4|mov|webm|avi|mkv|m4v|3gp|wmv|flv|mts|ts|qt)$/i.test(name);
-    };
-
-    // Helper to identify likely image file
-    const isImageFile = (name: string, mime?: string) => {
-        if (mime?.startsWith('image/')) return true;
-        return /\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|heic)$/i.test(name);
-    };
-
     const filteredAssets = assets.filter(a =>
         a.title.toLowerCase().includes(searchQuery.toLowerCase())
     );
@@ -378,7 +394,6 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                         <span className="text-indigo-600">Q</span> Drive
                     </h2>
                     <div className="flex items-center gap-1">
-                        {/* Delete Button (visible if selection) */}
                         {selectedItems.size > 0 && activeTab === 'storage' && (
                             <button
                                 onClick={handleDeleteSelected}
@@ -388,7 +403,6 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                                 <Trash2 className="h-4 w-4" />
                             </button>
                         )}
-                        {/* Upload Button */}
                         {activeTab === 'storage' && (
                             <button
                                 onClick={handleUploadClick}
@@ -520,20 +534,19 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                                     onDragStart={(e) => onDragStart(e, asset)}
                                     className="group relative bg-white border border-gray-100 rounded-xl overflow-hidden cursor-grab hover:shadow-md hover:border-indigo-200 transition-all dark:bg-zinc-800 dark:border-zinc-700"
                                 >
-                                    {/* Thumbnail */}
                                     <div className="aspect-video bg-gray-100 relative overflow-hidden dark:bg-zinc-900">
                                         {asset.thumbnailUrl ? (
                                             <img
                                                 src={asset.thumbnailUrl}
                                                 alt={asset.title}
                                                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                                loading="lazy"
                                             />
                                         ) : (
                                             <div className="w-full h-full flex items-center justify-center text-gray-300">
                                                 <Film className="h-8 w-8" />
                                             </div>
                                         )}
-                                        {/* Platform Icon Badge */}
                                         <div className="absolute top-1.5 right-1.5 bg-white rounded-full p-1 shadow-sm">
                                             {asset.platform === 'youtube' ? (
                                                 <YouTubeLogo width={12} height={12} />
@@ -542,8 +555,6 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                                             )}
                                         </div>
                                     </div>
-
-                                    {/* Info */}
                                     <div className="p-2.5">
                                         <h3 className="text-xs font-semibold text-gray-800 truncate dark:text-gray-200" title={asset.title}>
                                             {asset.title}
@@ -568,7 +579,7 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                         {filteredStorageItems.map((item, idx) => {
                             const isFolder = !item.metadata;
                             const isSelected = selectedItems.has(item.name);
-                            const url = isFolder ? '' : getPublicUrl(item.name);
+                            const mediaUrl = storageUrls.get(item.name) || '';
                             const isVid = !isFolder && isVideoFile(item.name, item.metadata?.mimetype);
                             const isImg = !isFolder && isImageFile(item.name, item.metadata?.mimetype);
 
@@ -576,7 +587,7 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                                 <div
                                     key={idx}
                                     data-name={item.name}
-                                    className={`storage-item group relative bg-white border rounded-xl overflow-hidden transition-all dark:bg-zinc-800 
+                                    className={`storage-item group relative bg-white border rounded-xl overflow-hidden transition-all dark:bg-zinc-800
                                         ${isFolder ? 'cursor-pointer' : 'cursor-grab'}
                                         ${isSelected
                                             ? 'border-indigo-500 ring-2 ring-indigo-500/20 z-10'
@@ -584,12 +595,11 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                                         }
                                     `}
                                     onClick={(e) => {
-                                        e.stopPropagation(); // Prevent background click clearing
+                                        e.stopPropagation();
                                         if (isFolder) {
                                             handleFolderClick(item.name);
                                         } else {
-                                            // Toggle selection
-                                            toggleSelection(item.name, e.ctrlKey || e.shiftKey || isSelecting); // isSelecting check to mimic marquee behavior
+                                            toggleSelection(item.name, e.ctrlKey || e.shiftKey || isSelecting);
                                         }
                                     }}
                                     draggable={!isFolder}
@@ -598,17 +608,15 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                                             e.preventDefault();
                                             return;
                                         }
-                                        // If dragging an unselected item, select it exclusively (unless ctrl)
                                         if (!isSelected && !e.ctrlKey) {
                                             setSelectedItems(new Set([item.name]));
                                         }
 
-                                        // Standard Drag Data for Tubiq
                                         const asset: Asset = {
                                             id: item.id || item.name,
                                             type: 'video',
                                             title: item.name,
-                                            url: url,
+                                            url: mediaUrl || getPublicUrl(item.name),
                                             platform: 'storage',
                                             size: item.metadata?.size || 0,
                                             updatedAt: item.updated_at || new Date().toISOString()
@@ -616,12 +624,39 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                                         onDragStart(e, asset);
                                     }}
                                 >
-                                    <StorageItem
-                                        item={item}
-                                        currentPath={currentPath}
-                                        isSelected={isSelected}
-                                        isFolder={isFolder}
-                                    />
+                                    {/* Selection Checkbox */}
+                                    {!isFolder && (
+                                        <div className={`absolute top-2 left-2 z-20 ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}>
+                                            <div className={`w-4 h-4 rounded-full border ${isSelected ? 'bg-indigo-500 border-indigo-500' : 'bg-white/80 border-gray-300'} flex items-center justify-center`}>
+                                                {isSelected && <CheckCircle2 className="w-3 h-3 text-white" />}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div className="aspect-video bg-gray-50 flex items-center justify-center relative dark:bg-zinc-900 overflow-hidden">
+                                        {isFolder ? (
+                                            <Folder className="h-10 w-10 text-emerald-200 group-hover:text-emerald-400 transition-colors" />
+                                        ) : isImg && mediaUrl ? (
+                                            <img
+                                                src={mediaUrl}
+                                                className="w-full h-full object-cover"
+                                                loading="lazy"
+                                                decoding="async"
+                                            />
+                                        ) : isVid && mediaUrl ? (
+                                            <StorageVideoThumbnail url={mediaUrl} />
+                                        ) : (
+                                            <HardDrive className="h-8 w-8 text-gray-300 group-hover:text-indigo-300 transition-colors" />
+                                        )}
+                                    </div>
+                                    <div className="p-2.5">
+                                        <h3 className="text-xs font-semibold text-gray-800 truncate dark:text-gray-200" title={item.name}>
+                                            {item.name}
+                                        </h3>
+                                        <p className="text-[10px] text-gray-400 mt-0.5">
+                                            {isFolder ? '폴더' : (item.metadata?.size ? `${(item.metadata.size / 1024 / 1024).toFixed(1)} MB` : 'File')}
+                                        </p>
+                                    </div>
                                 </div>
                             );
                         })}
@@ -645,15 +680,12 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
             <div className="p-3 border-t border-gray-100 bg-gray-50/50 text-[10px] text-gray-500 dark:border-zinc-800 dark:bg-zinc-900">
                 {activeTab === 'storage' ? (
                     <div className="space-y-1.5">
-                        {/* Status Text */}
                         <div className="text-center">
                             {selectedItems.size > 0
                                 ? `${selectedItems.size}개 선택됨`
                                 : `${storageItems.length} items`
                             }
                         </div>
-
-                        {/* Storage Progress Bar */}
                         {(() => {
                             const totalSize = storageItems.reduce((acc, item) => acc + (item.metadata?.size || 0), 0);
                             const usedMB = (totalSize / 1024 / 1024).toFixed(1);
@@ -664,8 +696,7 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
                                 <div>
                                     <div className="w-full bg-gray-200 rounded-full h-1.5 dark:bg-zinc-700 overflow-hidden">
                                         <div
-                                            className={`h-full rounded-full transition-all duration-500 ${percentage > 90 ? 'bg-rose-500' : 'bg-indigo-500'
-                                                }`}
+                                            className={`h-full rounded-full transition-all duration-500 ${percentage > 90 ? 'bg-rose-500' : 'bg-indigo-500'}`}
                                             style={{ width: `${percentage}%` }}
                                         />
                                     </div>
@@ -687,97 +718,59 @@ export default function QDriveSidebar({ onDragStart, onClose }: QDriveSidebarPro
     );
 }
 
-// Sub-component for Storage Items to handle async Signed URLs
-function StorageItem({ item, currentPath, isSelected, isFolder }: { item: any, currentPath: string[], isSelected: boolean, isFolder: boolean }) {
-    const [mediaUrl, setMediaUrl] = useState<string>('');
-    const [isVideo, setIsVideo] = useState(false);
-    const [isImage, setIsImage] = useState(false);
+// Optimized Video Thumbnail with Intersection Observer
+function StorageVideoThumbnail({ url }: { url: string }) {
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [isVisible, setIsVisible] = useState(false);
+    const [isLoaded, setIsLoaded] = useState(false);
 
     useEffect(() => {
-        if (isFolder) return;
-
-        const checkTypeAndFetchUrl = async () => {
-            const name = item.name;
-            const mime = item.metadata?.mimetype;
-
-            // Helper logic duplicated here
-            const _isVid = mime?.startsWith('video/') || /\.(mp4|mov|webm|avi|mkv|m4v|3gp|wmv|flv|mts|ts|qt)$/i.test(name);
-            const _isImg = mime?.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|heic)$/i.test(name);
-
-            setIsVideo(_isVid);
-            setIsImage(_isImg);
-
-            if (_isVid || _isImg) {
-                const fullPath = [...currentPath, name].join('/');
-                // Try fetching Signed URL (~1 hour validity)
-                const { data, error } = await supabase.storage.from('videos').createSignedUrl(fullPath, 3600);
-                if (data?.signedUrl) {
-                    setMediaUrl(data.signedUrl);
-                } else {
-                    // Fallback to public if signing fails (or public bucket)
-                    const { data: publicData } = supabase.storage.from('videos').getPublicUrl(fullPath);
-                    setMediaUrl(publicData.publicUrl);
+        const observer = new IntersectionObserver(
+            ([entry]) => {
+                if (entry.isIntersecting) {
+                    setIsVisible(true);
+                    observer.disconnect();
                 }
-            }
-        };
+            },
+            { rootMargin: '100px' }
+        );
 
-        checkTypeAndFetchUrl();
-    }, [item, currentPath, isFolder]);
+        if (containerRef.current) {
+            observer.observe(containerRef.current);
+        }
+
+        return () => observer.disconnect();
+    }, []);
 
     return (
-        <>
-            {/* Selection Checkbox */}
-            {!isFolder && (
-                <div className={`absolute top-2 left-2 z-20 ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}>
-                    <div className={`w-4 h-4 rounded-full border ${isSelected ? 'bg-indigo-500 border-indigo-500' : 'bg-white/80 border-gray-300'} flex items-center justify-center`}>
-                        {isSelected && <CheckCircle2 className="w-3 h-3 text-white" />}
-                    </div>
+        <div ref={containerRef} className="w-full h-full bg-black relative">
+            {!isLoaded && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                    <Film className="h-8 w-8 text-gray-600 animate-pulse" />
                 </div>
             )}
-
-            <div className="aspect-video bg-gray-50 flex items-center justify-center relative dark:bg-zinc-900 overflow-hidden">
-                {isFolder ? (
-                    <Folder className="h-10 w-10 text-emerald-200 group-hover:text-emerald-400 transition-colors" />
-                ) : (
-                    mediaUrl ? (
-                        isImage ? (
-                            <img src={mediaUrl} className="w-full h-full object-cover" loading="lazy" />
-                        ) : isVideo ? (
-                            <video
-                                src={mediaUrl + '#t=1.0'}
-                                className="w-full h-full object-cover bg-black"
-                                muted
-                                loop
-                                playsInline
-                                preload="metadata"
-                                crossOrigin="anonymous"
-                                onMouseEnter={(e) => {
-                                    const v = e.currentTarget;
-                                    v.currentTime = 0; // Start from beginning
-                                    v.play().catch(() => { });
-                                }}
-                                onMouseLeave={(e) => {
-                                    e.currentTarget.pause();
-                                    e.currentTarget.currentTime = 1.0; // Reset to thumbnail frame
-                                }}
-                            />
-                        ) : (
-                            <HardDrive className="h-8 w-8 text-gray-300 group-hover:text-indigo-300 transition-colors" />
-                        )
-                    ) : (
-                        <HardDrive className="h-8 w-8 text-gray-300 group-hover:text-indigo-300 transition-colors" />
-                    )
-                )}
-            </div>
-            <div className="p-2.5">
-                <h3 className="text-xs font-semibold text-gray-800 truncate dark:text-gray-200" title={item.name}>
-                    {item.name}
-                </h3>
-                <p className="text-[10px] text-gray-400 mt-0.5">
-                    {isFolder ? '폴더' : (item.metadata?.size ? `${(item.metadata.size / 1024 / 1024).toFixed(1)} MB` : 'File')}
-                </p>
-            </div>
-        </>
+            {isVisible && (
+                <video
+                    ref={videoRef}
+                    src={url + '#t=1.0'}
+                    className={`w-full h-full object-cover transition-opacity duration-200 ${isLoaded ? 'opacity-100' : 'opacity-0'}`}
+                    muted
+                    playsInline
+                    preload="metadata"
+                    crossOrigin="anonymous"
+                    onLoadedData={() => setIsLoaded(true)}
+                    onMouseEnter={(e) => {
+                        const v = e.currentTarget;
+                        v.currentTime = 0;
+                        v.play().catch(() => {});
+                    }}
+                    onMouseLeave={(e) => {
+                        e.currentTarget.pause();
+                        e.currentTarget.currentTime = 1.0;
+                    }}
+                />
+            )}
+        </div>
     );
 }
-

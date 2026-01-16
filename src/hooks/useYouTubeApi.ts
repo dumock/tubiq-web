@@ -30,6 +30,10 @@ interface ApiConfig {
         keys: ApiKey[];
         rotationEnabled: boolean;
     };
+    kei: {
+        keys: ApiKey[];
+        rotationEnabled: boolean;
+    };
     voice: {
         typecast: string;
         elevenlabs: string;
@@ -43,6 +47,7 @@ const DEFAULT_CONFIG: ApiConfig = {
     openai: { keys: [], rotationEnabled: false },
     tikhub: { keys: [], rotationEnabled: false },
     fal: { keys: [], rotationEnabled: false },
+    kei: { keys: [], rotationEnabled: false },
     voice: { typecast: '', elevenlabs: '', minimax: '' }
 };
 
@@ -162,6 +167,17 @@ export function useYouTubeApi() {
         return activeKeys[0].key;
     }, [config.tikhub]);
 
+    const getActiveKeiKey = useCallback(() => {
+        const keiConfig = config.kei || { keys: [], rotationEnabled: false };
+        const activeKeys = keiConfig.keys.filter(k => k.active);
+        if (activeKeys.length === 0) return null;
+        if (keiConfig.rotationEnabled) {
+            const idx = Math.floor(Math.random() * activeKeys.length);
+            return activeKeys[idx].key;
+        }
+        return activeKeys[0].key;
+    }, [config.kei]);
+
     // 4. API 호출 래퍼 (YouTube 전용 래퍼 유지 - 하위 호환성)
     const fetchYouTube = useCallback(async (url: string, options: RequestInit = {}) => {
         const ytKey = getActiveYoutubeKey();
@@ -193,6 +209,8 @@ export function useYouTubeApi() {
         isLoading,
         hasYoutubeKey: config.youtube.keys.some(k => k.active),
         hasGeminiKey: config.gemini.keys.some(k => k.active),
-        hasTikHubKey: (config.tikhub?.keys || []).some(k => k.active)
+        hasTikHubKey: (config.tikhub?.keys || []).some(k => k.active),
+        hasKeiKey: (config.kei?.keys || []).some(k => k.active),
+        getActiveKeiKey
     };
 }

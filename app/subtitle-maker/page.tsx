@@ -105,23 +105,37 @@ export default function SubtitleMakerPage() {
         endTime: number;
         sourceStart: number;
         sourceEnd: number;
-        layer?: number; // 0 = Main, 1 = Overlay
+        layer?: number; // 0 = Main, 1+ = Overlay
         assetId?: string; // ID of the video asset
-        trackId?: number; // Added for consistency with instruction's newClip
-        src?: string; // Added for consistency with instruction's newClip
-        type?: string; // Added for consistency with instruction's newClip
-        name?: string; // Added for consistency with instruction's newClip
-        startOffset?: number; // Added for consistency with instruction's newClip
+        trackId?: number;
+        src?: string;
+        type?: string;
+        name?: string;
+        startOffset?: number;
         frames?: string[]; // Per-clip frame thumbnails
         previewPosition?: { x: number; y: number }; // Position in preview (percentage)
         scale?: number; // Scale factor (default 1)
+        ratio?: number; // Aspect ratio (width / height)
+        isMuted?: boolean; // Track-level mute
+        isLocked?: boolean; // Track-level lock (prevent editing/moving)
+        isHidden?: boolean; // Track-level visibility (hide from preview)
+        // Audio-Video Linking
+        hasAudio?: boolean;       // Does this clip have audio?
+        audioClipId?: string;     // Linked audio clip ID
+        isAudioLinked?: boolean;  // true = linked (move together), false = unlinked
     }
     const [videoClips, setVideoClips] = useState<VideoClip[]>([]);
 
     // Interaction State
     const [draggingOverlayId, setDraggingOverlayId] = useState<string | null>(null);
     const [resizingOverlayId, setResizingOverlayId] = useState<string | null>(null);
-    const resizeStartData = useRef<{ startScale: number; startDist: number } | null>(null);
+    const resizeStartData = useRef<{
+        startScale: number;
+        startDist: number;
+        startX: number;
+        startY: number;
+        startPos: { x: number; y: number };
+    } | null>(null);
 
     // Audio Clips State (for separated audio editing)
     interface AudioClip {
@@ -131,6 +145,10 @@ export default function SubtitleMakerPage() {
         endTime: number;
         sourceStart: number;
         sourceEnd: number;
+        // Enhanced fields for multi-track audio
+        layer?: number;           // Audio track layer (A1=0, A2=1, etc.)
+        src?: string;            // Audio source URL (same as video src)
+        isMuted?: boolean;       // Mute state
     }
     const [audioClips, setAudioClips] = useState<AudioClip[]>([]);
 
@@ -140,6 +158,15 @@ export default function SubtitleMakerPage() {
 
     // Audio Separation State
     const [isAudioSeparated, setIsAudioSeparated] = useState(false);
+
+    // Timeline Height Resize State
+    const [timelineHeight, setTimelineHeight] = useState(200); // Default timeline height in pixels
+    const [isResizingTimeline, setIsResizingTimeline] = useState(false);
+    const resizeStartY = useRef(0);
+    const resizeStartHeight = useRef(200);
+
+    // Subtitle Table Toggle State (for manual subtitle entry)
+    const [isSubtitleTableOpen, setIsSubtitleTableOpen] = useState(false);
 
     // Undo/Redo History State
     const [history, setHistory] = useState<{ subtitles: Subtitle[], videoClips: VideoClip[], audioClips?: AudioClip[] }[]>([]);
@@ -156,9 +183,12 @@ export default function SubtitleMakerPage() {
     const hiddenVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
     const [mainVideoElement, setMainVideoElement] = useState<HTMLVideoElement | null>(null);
 
-    // Removed Double Buffer Refs
+    // Video logic
     const mainVideoRef = useRef<HTMLVideoElement>(null);
     // const [videoElementReady, setVideoElementReady] = useState<HTMLVideoElement | null>(null); // Replaced by mainVideoElement
+
+    // Waveform needs the mainVideoElement state to analyze audio.
+    // Ensure we update the state when the ref is attached.
     const preparedClipIdRef = useRef<string | null>(null);
 
 
@@ -637,6 +667,62 @@ export default function SubtitleMakerPage() {
         });
     };
 
+    // Separate all video clips' audio into independent AudioClips
+    const separateAllAudio = () => {
+        const newAudioClips: AudioClip[] = [];
+
+        videoClips.forEach(clip => {
+            if (clip.hasAudio && clip.isAudioLinked) {
+                // Create independent AudioClip for this video
+                const audioClip: AudioClip = {
+                    id: `audio-${clip.id}`,
+                    videoClipId: clip.id,
+                    startTime: clip.startTime,
+                    endTime: clip.endTime,
+                    sourceStart: clip.sourceStart,
+                    sourceEnd: clip.sourceEnd,
+                    layer: clip.layer || 0,  // Same layer as video (A1 matches V1, etc.)
+                    src: clip.src,
+                    isMuted: false,
+                };
+                newAudioClips.push(audioClip);
+            }
+        });
+
+        // Update video clips to mark audio as unlinked
+        updateVideoClipsWithHistory(prev =>
+            prev.map(clip =>
+                clip.hasAudio && clip.isAudioLinked
+                    ? { ...clip, isAudioLinked: false, audioClipId: `audio-${clip.id}` }
+                    : clip
+            )
+        );
+
+        // Add audio clips
+        updateAudioClipsWithHistory(prev => [...prev, ...newAudioClips]);
+        setIsAudioSeparated(true);
+
+        console.log(`Separated audio from ${newAudioClips.length} clips`);
+    };
+
+    // Re-link all audio back to video clips
+    const relinkAllAudio = () => {
+        // Remove audio clips
+        updateAudioClipsWithHistory([]);
+
+        // Mark all video clips as audio linked
+        updateVideoClipsWithHistory(prev =>
+            prev.map(clip =>
+                clip.hasAudio
+                    ? { ...clip, isAudioLinked: true, audioClipId: undefined }
+                    : clip
+            )
+        );
+
+        setIsAudioSeparated(false);
+        console.log('Audio re-linked to video clips');
+    };
+
     // Reset when videoUrl changes
     useEffect(() => {
         // If we are restoring clips (ignoreResetRef is true), don't wipe them!
@@ -654,18 +740,36 @@ export default function SubtitleMakerPage() {
     // Initialize default clip when duration is ready
     useEffect(() => {
         if (videoUrl && duration > 0 && !hasInitializedClips.current) {
+            const clipId = `clip-main-${Date.now()}`;
+
+            // Get video dimensions for aspect ratio
+            const videoRatio = mainVideoRef.current
+                ? mainVideoRef.current.videoWidth / mainVideoRef.current.videoHeight
+                : 16 / 9; // Default to 16:9 if not available
+
+            // CapCut-style: Create main video clip WITHOUT separate audio clip
+            // Audio will only appear in A1 after user clicks "분리" button
             setVideoClips([{
-                id: `intro-clip-${Date.now()}`,
+                id: clipId,
                 startTime: 0,
                 endTime: duration,
                 sourceStart: 0,
                 sourceEnd: duration,
                 layer: 0,
                 assetId: 'main',
-                src: videoUrl
+                src: videoUrl,
+                hasAudio: true,
+                isAudioLinked: true,  // Audio stays with video until explicitly separated
+                ratio: videoRatio || 16 / 9 // Store actual aspect ratio
             }]);
+
+            // Don't create audio clip - CapCut style
+            // setAudioClips(...) removed
+
             if (!assets['main']) setAssets(prev => ({ ...prev, 'main': videoUrl }));
             hasInitializedClips.current = true;
+
+            console.log('[Init] Created main clip (no separate audio):', clipId, 'ratio:', videoRatio);
         }
     }, [duration, videoUrl]);
 
@@ -674,7 +778,11 @@ export default function SubtitleMakerPage() {
         if (mainVideoRef.current) {
             // Priority: first clip's src > videoUrl
             const firstClipSrc = videoClips.length > 0 ? videoClips[0].src : null;
-            const srcToSet = firstClipSrc || videoUrl;
+            const rawSrc = firstClipSrc || videoUrl;
+            // Use proxy for CORS with http URLs (e.g., Supabase)
+            const srcToSet = rawSrc?.startsWith('http')
+                ? `/api/proxy-video?url=${encodeURIComponent(rawSrc)}`
+                : rawSrc;
             if (srcToSet && mainVideoRef.current.src !== srcToSet) {
                 console.log('[SubtitleMaker] Setting mainVideoRef src:', srcToSet?.substring(0, 80));
                 mainVideoRef.current.src = srcToSet;
@@ -932,30 +1040,104 @@ export default function SubtitleMakerPage() {
                 const asset = JSON.parse(tubiqAssetData);
                 console.log("Dropped Q Drive Asset:", asset);
 
+                // If from Storage, get signed URL for proper playback
+                let finalUrl = asset.url;
+                if (asset.platform === 'storage' && asset.url) {
+                    // Extract path from URL
+                    const urlObj = new URL(asset.url);
+                    const pathMatch = urlObj.pathname.match(/\/videos\/(.+)$/);
+                    if (pathMatch) {
+                        const storagePath = decodeURIComponent(pathMatch[1]);
+                        const { data } = await supabase.storage.from('videos').createSignedUrl(storagePath, 3600);
+                        if (data?.signedUrl) {
+                            finalUrl = data.signedUrl;
+                            console.log("Using signed URL for storage asset:", finalUrl);
+                        }
+                    }
+                }
+
                 // Add to timeline
                 const newClipId = `clip-${Date.now()}`;
 
-                if (!videoUrl) {
-                    setVideoUrl(asset.url);
-                    setAssets({ 'main': asset.url });
-                } else {
-                    // Add as overlay or next clip
-                    setVideoClips(prev => {
-                        const maxLayer = Math.max(0, ...prev.map(c => c.layer || 0));
-                        return [...prev, {
-                            id: newClipId,
-                            startTime: currentTime,
-                            endTime: currentTime + 10,
-                            sourceStart: 0,
-                            sourceEnd: 10,
-                            layer: maxLayer + 1,
-                            assetId: asset.id,
-                            // Helper props if needed, but videoClips types are strict
-                        }];
-                    });
-                    // Register asset url
-                    setAssets(prev => ({ ...prev, [asset.id]: asset.url }));
-                }
+                // Load video metadata to get actual duration
+                const videoEl = document.createElement('video');
+                videoEl.crossOrigin = 'anonymous';
+                // Use proxy for CORS
+                const proxiedUrl = finalUrl.startsWith('http')
+                    ? `/api/proxy-video?url=${encodeURIComponent(finalUrl)}`
+                    : finalUrl;
+                videoEl.src = proxiedUrl;
+
+                videoEl.onloadedmetadata = () => {
+                    const videoDuration = videoEl.duration || 10;
+
+                    // Find next available layer (V1=0, V2=1, V3=2...)
+                    const newLayer = videoClips.length === 0 ? 0 : Math.max(0, ...videoClips.map(c => c.layer || 0)) + 1;
+
+                    // Magnet snap: find last clip end time in this layer
+                    const sameLayerClips = videoClips.filter(c => (c.layer || 0) === newLayer);
+                    const snapStartTime = sameLayerClips.length > 0
+                        ? Math.max(...sameLayerClips.map(c => c.endTime))
+                        : 0;
+
+                    const newClip: VideoClip = {
+                        id: newClipId,
+                        startTime: snapStartTime,
+                        endTime: snapStartTime + videoDuration,
+                        sourceStart: 0,
+                        sourceEnd: videoDuration,
+                        layer: newLayer,
+                        assetId: asset.id,
+                        src: finalUrl,
+                        hasAudio: true,
+                        isAudioLinked: true,
+                    };
+
+                    updateVideoClipsWithHistory(prev => [...prev, newClip]);
+                    setAssets(prev => ({ ...prev, [asset.id]: finalUrl }));
+
+                    // Set as main video if first clip
+                    if (!videoUrl) {
+                        setVideoUrl(finalUrl);
+                    }
+
+                    // Update duration if needed
+                    const newEndTime = snapStartTime + videoDuration;
+                    if (newEndTime > duration) {
+                        setDuration(newEndTime);
+                    }
+
+                    console.log(`Q Drive clip added to V${newLayer + 1} at ${snapStartTime}:`, newClipId);
+                };
+
+                videoEl.onerror = () => {
+                    const newLayer = videoClips.length === 0 ? 0 : Math.max(0, ...videoClips.map(c => c.layer || 0)) + 1;
+                    const sameLayerClips = videoClips.filter(c => (c.layer || 0) === newLayer);
+                    const snapStartTime = sameLayerClips.length > 0
+                        ? Math.max(...sameLayerClips.map(c => c.endTime))
+                        : 0;
+
+                    const newClip: VideoClip = {
+                        id: newClipId,
+                        startTime: snapStartTime,
+                        endTime: snapStartTime + 10,
+                        sourceStart: 0,
+                        sourceEnd: 10,
+                        layer: newLayer,
+                        assetId: asset.id,
+                        src: finalUrl,
+                        hasAudio: true,
+                        isAudioLinked: true,
+                    };
+                    updateVideoClipsWithHistory(prev => [...prev, newClip]);
+                    setAssets(prev => ({ ...prev, [asset.id]: finalUrl }));
+
+                    if (!videoUrl) {
+                        setVideoUrl(finalUrl);
+                    }
+
+                    console.log(`Q Drive clip added (fallback) to V${newLayer + 1}:`, newClipId);
+                };
                 return;
             } catch (err) {
                 console.error("Failed to parse Q Drive drop:", err);
@@ -971,46 +1153,57 @@ export default function SubtitleMakerPage() {
             if (isVideo) {
                 // Immediate local preview
                 const localUrl = URL.createObjectURL(file);
+                const assetId = `asset-${Date.now()}`;
+                const clipId = `clip-${Date.now()}`;
 
-                if (!videoUrl) {
-                    setVideoFile(file);
-                    setVideoUrl(localUrl);
-                    setAssets({ 'main': localUrl });
+                setAssets(prev => ({ ...prev, [assetId]: localUrl }));
 
-                    // Background upload
-                    uploadToSupabase(file).then(remoteUrl => {
-                        if (remoteUrl) {
-                            console.log('Video uploaded:', remoteUrl);
-                            // Optionally switch to remote URL or keep local for performance
-                            // setVideoUrl(remoteUrl);
-                        }
-                    });
-                } else {
-                    const assetId = `asset-${Date.now()}`;
-                    setAssets(prev => ({ ...prev, [assetId]: localUrl }));
+                const videoEl = document.createElement('video');
+                videoEl.src = localUrl;
+                videoEl.onloadedmetadata = () => {
+                    const newDuration = videoEl.duration;
 
-                    const videoEl = document.createElement('video');
-                    videoEl.src = localUrl;
-                    videoEl.onloadedmetadata = () => {
-                        const newDuration = videoEl.duration;
-                        const newLayer = Math.max(0, ...videoClips.map(c => c.layer || 0)) + 1;
+                    // Find next available layer (V1=0, V2=1, V3=2...)
+                    const newLayer = videoClips.length === 0 ? 0 : Math.max(0, ...videoClips.map(c => c.layer || 0)) + 1;
 
-                        const newClip: VideoClip = {
-                            id: `clip-${Date.now()}`,
-                            startTime: currentTime,
-                            endTime: currentTime + newDuration,
-                            sourceStart: 0,
-                            sourceEnd: newDuration,
-                            layer: newLayer,
-                            assetId: assetId,
-                            src: localUrl // Ensure src is present for frame extraction
-                        };
-                        updateVideoClipsWithHistory(prev => [...prev, newClip]);
+                    // Magnet snap: find last clip end time in this layer
+                    const sameLayerClips = videoClips.filter(c => (c.layer || 0) === newLayer);
+                    const snapStartTime = sameLayerClips.length > 0
+                        ? Math.max(...sameLayerClips.map(c => c.endTime))
+                        : 0;
+
+                    const newClip: VideoClip = {
+                        id: clipId,
+                        startTime: snapStartTime,
+                        endTime: snapStartTime + newDuration,
+                        sourceStart: 0,
+                        sourceEnd: newDuration,
+                        layer: newLayer,
+                        assetId: assetId,
+                        src: localUrl,
+                        hasAudio: true,
+                        isAudioLinked: true,
                     };
 
-                    // Background upload
-                    uploadToSupabase(file);
-                }
+                    updateVideoClipsWithHistory(prev => [...prev, newClip]);
+
+                    // Set as main video if first clip
+                    if (!videoUrl) {
+                        setVideoFile(file);
+                        setVideoUrl(localUrl);
+                    }
+
+                    // Update duration if needed
+                    const newEndTime = snapStartTime + newDuration;
+                    if (newEndTime > duration) {
+                        setDuration(newEndTime);
+                    }
+
+                    console.log(`Local clip added to V${newLayer + 1} at ${snapStartTime}:`, clipId);
+                };
+
+                // Background upload
+                uploadToSupabase(file);
             } else if (isAudio) {
                 setAudioFile(file);
             }
@@ -1020,10 +1213,21 @@ export default function SubtitleMakerPage() {
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file) {
+            // CRITICAL: Reset all video-related states for clean replacement
+            setPlaybackTime(0);
+            setVideoClips([]);  // Clear old clips
+            hasInitializedClips.current = false;  // Allow re-initialization
+            setMainVideoElement(null);  // Reset video element reference
+            setDuration(0);  // Reset duration (will be set by onLoadedMetadata)
+            hiddenVideoRefs.current.clear();  // Clear overlay video pool
+
+            // Set new video
             setVideoFile(file);
             const localUrl = URL.createObjectURL(file);
             setVideoUrl(localUrl);
             setAssets({ 'main': localUrl });
+
+            console.log('[VideoReplace] States reset, new video loaded:', file.name);
 
             // Background upload
             uploadToSupabase(file).then(remoteUrl => {
@@ -1043,20 +1247,66 @@ export default function SubtitleMakerPage() {
         videoEl.src = localUrl;
         videoEl.onloadedmetadata = () => {
             const newDuration = videoEl.duration;
-            const newLayer = Math.max(0, ...videoClips.map(c => c.layer || 0)) + 1;
+            const clipId = `clip-${Date.now()}`;
+
+            // Find the next available layer (V1=0, V2=1, V3=2, ...)
+            // Each new clip goes to a new layer for multi-track editing
+            const usedLayers = new Set(videoClips.map(c => c.layer || 0));
+            let newLayer = 0;
+
+            // If there are already clips, assign to next layer
+            if (videoClips.length > 0) {
+                const maxLayer = Math.max(...videoClips.map(c => c.layer || 0));
+                newLayer = maxLayer + 1;
+            }
+
+            // Alternative: Find first layer where there's no overlap at the drop time
+            // This allows stacking at same time on different layers
+            for (let layer = 0; layer <= (usedLayers.size + 1); layer++) {
+                const layerClips = videoClips.filter(c => (c.layer || 0) === layer);
+                const hasOverlap = layerClips.some(c =>
+                    (time >= c.startTime && time < c.endTime) ||
+                    (time + newDuration > c.startTime && time + newDuration <= c.endTime) ||
+                    (time <= c.startTime && time + newDuration >= c.endTime)
+                );
+                if (!hasOverlap) {
+                    newLayer = layer;
+                    break;
+                }
+            }
+
+            // Create new clip at the drop time on the new layer
+            // Calculate aspect ratio from video dimensions
+            const videoRatio = videoEl.videoWidth / videoEl.videoHeight;
 
             const newClip: VideoClip = {
-                id: `clip-${Date.now()}`,
+                id: clipId,
                 startTime: time,
                 endTime: time + newDuration,
                 sourceStart: 0,
                 sourceEnd: newDuration,
                 layer: newLayer,
                 assetId: assetId,
-                src: localUrl
+                src: localUrl,
+                hasAudio: true,
+                isAudioLinked: true,
+                ratio: videoRatio // Store actual aspect ratio
             };
 
             updateVideoClipsWithHistory(prev => [...prev, newClip]);
+
+            // Update duration if this clip extends beyond current duration
+            const newTotalDuration = time + newDuration;
+            if (newTotalDuration > duration) {
+                setDuration(newTotalDuration);
+            }
+
+            // Set as main video only if this is the first clip
+            if (videoClips.length === 0) {
+                setVideoUrl(localUrl);
+            }
+
+            console.log(`[Timeline Drop] Added clip to V${newLayer + 1} at ${time}:`, clipId);
         };
 
         // Background upload
@@ -1078,22 +1328,37 @@ export default function SubtitleMakerPage() {
             const ctx = canvas?.getContext('2d', { alpha: false }); // Optimize for no transparency
 
             if (canvas && ctx) {
-                // 1. Clear Canvas
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.fillStyle = '#000000';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-
                 // 2. Identify Active Clips at Current Time
                 // We use the Main Video's time as the source of truth if playing, else state time
                 const masterTime = mainVideoElement && !mainVideoElement.paused
                     ? mainVideoElement.currentTime
                     : playbackTime;
 
-                // Sync State Time if playing (Throttle state updates if needed, but here we just read)
-
                 const activeClips = videoClips
-                    .filter(c => masterTime >= c.startTime && masterTime < c.endTime)
+                    .filter(c => masterTime >= c.startTime && masterTime < c.endTime && !c.isHidden)
                     .sort((a, b) => (a.layer || 0) - (b.layer || 0));
+
+                // Check if main video is ready to draw (only if there's actually a V1 clip)
+                const mainClip = activeClips.find(c => (c.layer || 0) === 0);
+                const mainVideoReady = mainClip && mainVideoElement && mainVideoElement.readyState >= 2;
+
+                // Check if any overlay clip is ready to draw (for V2-only case)
+                const anyOverlayReady = activeClips.some(c => {
+                    if ((c.layer || 0) === 0) return false; // Skip main clip
+                    const videoEl = hiddenVideoRefs.current.get(c.id);
+                    return videoEl && videoEl.readyState >= 2;
+                });
+
+                // CRITICAL: Only clear canvas if we have something READY to draw
+                // This prevents flicker when V2 is still loading
+                const hasAnythingToDraw = mainVideoReady || anyOverlayReady;
+
+                if (hasAnythingToDraw || activeClips.length === 0) {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.fillStyle = '#000000';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                }
+                // else: Keep the last frame displayed during buffering
 
                 // 3. Draw Clips (Layer 0 -> N)
                 activeClips.forEach(clip => {
@@ -1158,7 +1423,8 @@ export default function SubtitleMakerPage() {
                             let baseW = width;
                             let baseH = height;
 
-                            const aspect = videoEl.videoWidth / videoEl.videoHeight || (16 / 9);
+                            // Use stored ratio if available, else derive from element or default
+                            const aspect = clip.ratio || (videoEl.videoWidth / videoEl.videoHeight) || (16 / 9);
 
                             // Calculate Contain Dimensions
                             if (width / height > aspect) {
@@ -1195,27 +1461,46 @@ export default function SubtitleMakerPage() {
         };
     }, [videoClips, playbackTime, isPlaying, mainVideoElement]); // Dependencies
 
+
     // Audio Sync for Overlays (Volume/Mute)
     // We unmute all active overlays to allow mixing, or handle volume.
     // Assuming simple mixing for now.
+
+    // Sync V1 (mainVideoElement) mute state with clip isMuted
+    useEffect(() => {
+        const video = mainVideoRef.current || mainVideoElement;
+        if (!video) return;
+
+        // Check if any V1 clip has isMuted set (track-level mute)
+        const v1Clips = videoClips.filter(c => (c.layer || 0) === 0);
+        const isV1Muted = v1Clips.some(c => c.isMuted);
+
+        // Also mute video if separated audio exists (to prevent echo)
+        const hasSeparatedAudio = audioClips.length > 0;
+
+        // Force apply mute state directly to video element
+        const shouldMute = isV1Muted || hasSeparatedAudio;
+        video.muted = shouldMute;
+        console.log('[Mute Sync] V1 muted:', isV1Muted, 'hasSeparatedAudio:', hasSeparatedAudio, 'video.muted:', video.muted);
+    }, [mainVideoElement, videoClips, audioClips]);
 
     // Audio Engine (for Separated Audio)
     useEffect(() => {
         const audioEl = audioRef.current;
         if (!audioEl) return;
 
-        if (!isAudioSeparated) {
+        // Play audio if there are separated audio clips
+        if (audioClips.length === 0) {
             if (!audioEl.paused) audioEl.pause();
             return;
         }
 
-        // Find active audio clip
+        // Find active audio clip at current time
         const clip = audioClips.find(c => currentTime >= c.startTime && currentTime < c.endTime);
 
         if (clip) {
-            // Simplification: Use main video URL as source for now (since clips mostly come from it)
-            // In future, support clip.assetId for audio too
-            const src = videoUrl;
+            // Use clip's own source (from video it was separated from)
+            const src = clip.src || videoUrl;
             if (src && audioEl.src !== src && !audioEl.src.includes(src)) {
                 audioEl.src = src;
             }
@@ -1236,7 +1521,7 @@ export default function SubtitleMakerPage() {
         } else {
             if (!audioEl.paused) audioEl.pause();
         }
-    }, [currentTime, audioClips, isPlaying, isAudioSeparated, videoUrl]);
+    }, [currentTime, audioClips, isPlaying, videoUrl]);
 
     // Video Processing Request
     const [isProcessing, setIsProcessing] = useState(false);
@@ -1250,7 +1535,7 @@ export default function SubtitleMakerPage() {
         setIsProcessing(true);
         try {
             // Get current session for user ID
-            const { data: { session } } = await supabase.auth.getSession();
+            const { data: { session } = {} } = await supabase.auth.getSession();
             if (!session) throw new Error("No session");
 
             // Assuming file is already uploaded and we have the path
@@ -1866,41 +2151,59 @@ export default function SubtitleMakerPage() {
         const target = e.target as Element;
         target.setPointerCapture(e.pointerId);
 
+        const clip = videoClips.find(c => c.id === clipId);
+        if (!clip) return;
+
+        const currentPos = clip.previewPosition || { x: 50, y: 50 };
+        const currentScale = clip.scale || 1;
+
+        if (videoContainerRef.current) {
+            const rect = videoContainerRef.current.getBoundingClientRect();
+
+            // Calculate Center of the clip in pixels for Resize distance
+            const centerX = rect.left + (rect.width * (currentPos.x / 100));
+            const centerY = rect.top + (rect.height * (currentPos.y / 100));
+            const dist = Math.hypot(e.clientX - centerX, e.clientY - centerY);
+
+            resizeStartData.current = {
+                startScale: currentScale,
+                startDist: dist,
+                startX: e.clientX,
+                startY: e.clientY,
+                startPos: { ...currentPos }
+            };
+        }
+
         if (type === 'resize') {
             setResizingOverlayId(clipId);
-            // Calculate initial distance for scaling
-            if (videoContainerRef.current) {
-                const rect = videoContainerRef.current.getBoundingClientRect();
-                const clip = videoClips.find(c => c.id === clipId);
-                if (clip) {
-                    const center = clip.previewPosition || { x: 50, y: 50 };
-                    const centerX = rect.left + (rect.width * (center.x / 100));
-                    const centerY = rect.top + (rect.height * (center.y / 100));
-                    const dist = Math.hypot(e.clientX - centerX, e.clientY - centerY);
-                    resizeStartData.current = { startScale: clip.scale || 1, startDist: dist };
-                }
-            }
         } else {
             setDraggingOverlayId(clipId);
         }
     };
 
     const handleOverlayPointerMove = (e: React.PointerEvent) => {
-        if (!videoContainerRef.current) return;
+        if (!videoContainerRef.current || !resizeStartData.current) return;
         const container = videoContainerRef.current;
         const rect = container.getBoundingClientRect();
 
         // 1. Handle Resizing
-        if (resizingOverlayId && resizeStartData.current) {
+        if (resizingOverlayId) {
+            const { startDist, startScale, startX, startY } = resizeStartData.current;
+
+            // Only consider distance change for scaling, or use hybrid approach
+            // Simple approach: Distance from center of OBJECT (not mouse start)
+            // But we need the object center. Let's stick to the previous logic but using robust start data.
+            // Recalculate center based on live updated position? No, use start pos.
+
             const clip = videoClips.find(c => c.id === resizingOverlayId);
             if (clip) {
                 const center = clip.previewPosition || { x: 50, y: 50 };
                 const centerX = rect.left + (rect.width * (center.x / 100));
                 const centerY = rect.top + (rect.height * (center.y / 100));
-
                 const curDist = Math.hypot(e.clientX - centerX, e.clientY - centerY);
-                const scaleFactor = curDist / resizeStartData.current.startDist;
-                const newScale = Math.max(0.1, resizeStartData.current.startScale * scaleFactor);
+
+                const scaleFactor = curDist / startDist;
+                const newScale = Math.max(0.1, startScale * scaleFactor);
 
                 setVideoClips(prev => prev.map(c =>
                     c.id === resizingOverlayId ? { ...c, scale: newScale } : c
@@ -1909,15 +2212,24 @@ export default function SubtitleMakerPage() {
             return;
         }
 
-        // 2. Handle Moving
+        // 2. Handle Moving (Delta-based)
         if (draggingOverlayId) {
-            // Calculate percentage relative to container
-            const x = ((e.clientX - rect.left) / rect.width) * 100;
-            const y = ((e.clientY - rect.top) / rect.height) * 100;
+            const { startX, startY, startPos } = resizeStartData.current;
+
+            const deltaX = e.clientX - startX;
+            const deltaY = e.clientY - startY;
+
+            // Convert Pixel Delta to Percentage
+            const deltaPercentX = (deltaX / rect.width) * 100;
+            const deltaPercentY = (deltaY / rect.height) * 100;
+
+            const newX = startPos.x + deltaPercentX;
+            const newY = startPos.y + deltaPercentY;
 
             // Clamp values (allow slight overdraw for ease)
-            const clampedX = Math.max(-20, Math.min(120, x));
-            const clampedY = Math.max(-20, Math.min(120, y));
+            // Relaxed clamping to allow moving off-screen
+            const clampedX = Math.max(-100, Math.min(200, newX));
+            const clampedY = Math.max(-100, Math.min(200, newY));
 
             setVideoClips(prev => prev.map(c =>
                 c.id === draggingOverlayId
@@ -2134,17 +2446,21 @@ export default function SubtitleMakerPage() {
                                                         mainVideoRef.current = el;
                                                         if (el && !mainVideoElement) setMainVideoElement(el);
                                                     }}
-                                                    src={videoUrl || ''}
+                                                    crossOrigin="anonymous"
+                                                    src={videoUrl ? (videoUrl.startsWith('http') ? `/api/proxy-video?url=${encodeURIComponent(videoUrl)}` : videoUrl) : ''}
                                                     preload="auto"
-                                                    muted={false} // Enable Audio
+                                                    // muted is controlled by useEffect for reliable muting
                                                     onTimeUpdate={(e) => {
                                                         const t = e.currentTarget.currentTime;
                                                         setPlaybackTime(t);
                                                     }}
                                                     onLoadedMetadata={(e) => {
                                                         const dur = e.currentTarget.duration;
-                                                        if (!hasInitializedClips.current) {
+                                                        // CRITICAL: Set duration for timeline and waveform
+                                                        if (dur && dur > 0) {
                                                             setDuration(dur);
+                                                        }
+                                                        if (!hasInitializedClips.current) {
                                                             setVideoClips([{
                                                                 id: `clip-${Date.now()}`,
                                                                 startTime: 0,
@@ -2152,8 +2468,9 @@ export default function SubtitleMakerPage() {
                                                                 sourceStart: 0,
                                                                 sourceEnd: dur,
                                                                 layer: 0,
+                                                                ratio: e.currentTarget.videoWidth / e.currentTarget.videoHeight,
                                                                 scale: 1, // Default scale
-                                                                src: e.currentTarget.currentSrc || videoUrl || ''
+                                                                src: videoUrl || '' // Use original URL, not proxy URL
                                                             }]);
                                                             hasInitializedClips.current = true;
                                                         }
@@ -2161,7 +2478,7 @@ export default function SubtitleMakerPage() {
                                                 />
                                                 {/* Overlay Videos (Layer > 0) */}
                                                 {videoClips
-                                                    .filter(c => (c.layer || 0) > 0)
+                                                    .filter(c => (c.layer || 0) > 0 && c.src)
                                                     .map(clip => {
                                                         const src = clip.src?.startsWith('http')
                                                             ? `/api/proxy-video?url=${encodeURIComponent(clip.src)}`
@@ -2174,72 +2491,35 @@ export default function SubtitleMakerPage() {
                                                                     if (el) hiddenVideoRefs.current.set(clip.id, el);
                                                                     else hiddenVideoRefs.current.delete(clip.id);
                                                                 }}
+                                                                crossOrigin="anonymous"
                                                                 src={src}
+                                                                className="hidden"
                                                                 preload="auto"
-                                                                muted={false} // Mixing Audio
+                                                                muted={!!clip.isMuted}
+                                                                playsInline
+                                                                onLoadedData={(e) => {
+                                                                    // Seek to first frame immediately for preview
+                                                                    const video = e.currentTarget;
+                                                                    video.currentTime = clip.sourceStart || 0;
+                                                                    console.log('[V2 Preload] First frame ready:', clip.id);
+                                                                }}
+                                                                onLoadedMetadata={(e) => {
+                                                                    const ratio = e.currentTarget.videoWidth / e.currentTarget.videoHeight;
+                                                                    if (ratio && (!clip.ratio || Math.abs(clip.ratio - ratio) > 0.01)) {
+                                                                        setVideoClips(prev => prev.map(c => c.id === clip.id ? { ...c, ratio: ratio } : c));
+                                                                    }
+                                                                }}
                                                             />
                                                         );
                                                     })
                                                 }
                                             </div>
 
-                                            {/* OVERLAY INTERACTION LAYER (Transparent Divs) */}
-                                            <div className="absolute inset-0 z-[20]">
-                                                {videoClips
-                                                    .filter(c => (c.layer || 0) > 0 && playbackTime >= c.startTime && playbackTime < c.endTime)
-                                                    .map(clip => {
-                                                        const position = clip.previewPosition || { x: 50, y: 50 };
-                                                        const scale = clip.scale || 1;
-                                                        const isSelected = draggingOverlayId === clip.id || resizingOverlayId === clip.id;
 
-                                                        // Helper to get Aspect Ratio
-                                                        // We don't have exact aspect here easily without state, 
-                                                        // but we can default to 16:9 or 9:16 based on assumptions or lookups.
-                                                        // For interaction, exact box match isn't 100% critical as long as it's sizable.
-                                                        // Let's assume Landscape (16:9) for overlay default or use a square-ish box that scales.
-                                                        // Better: Retrieve aspect from hiddenVideoRef if possible?
-                                                        // Complex in render. Let's use a standard box that scales.
+                                            {/* Placeholder: Overlay Interaction moved outside (see below) */}
 
-                                                        return (
-                                                            <div
-                                                                key={clip.id}
-                                                                onPointerDown={(e) => handleOverlayPointerDown(e, clip.id, 'move')}
-                                                                onPointerMove={handleOverlayPointerMove}
-                                                                onPointerUp={handleOverlayPointerUp}
-                                                                className={`absolute group bg-transparent`}
-                                                                style={{
-                                                                    left: `${position.x}%`,
-                                                                    top: `${position.y}%`,
-                                                                    transform: `translate(-50%, -50%) scale(${scale})`,
-                                                                    width: '100%', // Base width, transforms scale it
-                                                                    height: 'auto',
-                                                                    aspectRatio: '16/9', // Assumed aspect for hit box.
-                                                                    zIndex: (clip.layer || 0) + 10,
-                                                                    maxWidth: '100%'
-                                                                }}
-                                                            >
-                                                                {/* Visual Border Box (Only visible on hover/drag) */}
-                                                                <div className={`w-full h-full border-2 border-dashed transition-colors ${isSelected ? 'border-yellow-400 bg-white/5' : 'border-transparent hover:border-blue-400'}`}>
-
-                                                                    {/* Resize Handle (Bottom Right) */}
-                                                                    <div
-                                                                        className={`absolute -bottom-3 -right-3 w-6 h-6 bg-white rounded-full shadow-md cursor-nwse-resize flex items-center justify-center transition-opacity ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
-                                                                        onPointerDown={(e) => handleOverlayPointerDown(e, clip.id, 'resize')}
-                                                                    >
-                                                                        <div className="w-2 h-2 bg-indigo-600 rounded-full" />
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })
-                                                }
-                                            </div>
-
-                                            {/* Click to Toggle Play/Pause */}
-                                            <div
-                                                className="absolute inset-0 z-[999] cursor-pointer bg-transparent"
-                                                onClick={togglePlay}
-                                            />
+                                            {/* CapCut Style: Click on preview does NOT toggle play. Use Play Button instead. */}
+                                            {/* Removed: togglePlay on click layer */}
                                         </div>
                                         {/* Subtitle Overlay - Draggable */}
                                         <div
@@ -2339,6 +2619,72 @@ export default function SubtitleMakerPage() {
                                                     }}
                                                 />
                                             </label>
+                                        </div>
+
+                                        {/* OVERLAY INTERACTION LAYER (TOP OF Z-STACK - z-3000) */}
+                                        <div className="absolute inset-0 z-[3000] pointer-events-none">
+                                            {videoClips
+                                                .filter(c => (c.layer || 0) > 0 && playbackTime >= c.startTime && playbackTime < c.endTime)
+                                                .map(clip => {
+                                                    const position = clip.previewPosition || { x: 50, y: 50 };
+                                                    const scale = clip.scale || 1;
+                                                    const isSelected = draggingOverlayId === clip.id || resizingOverlayId === clip.id;
+
+                                                    const containerAspect = 9 / 16;
+                                                    const clipAspect = clip.ratio || (16 / 9);
+
+                                                    let sizeStyle: React.CSSProperties = {};
+                                                    if (clipAspect > containerAspect) {
+                                                        sizeStyle = { width: '100%', height: 'auto', aspectRatio: `${clipAspect}` };
+                                                    } else {
+                                                        sizeStyle = { height: '100%', width: 'auto', aspectRatio: `${clipAspect}` };
+                                                    }
+
+                                                    return (
+                                                        <div
+                                                            key={clip.id}
+                                                            onPointerDown={(e) => {
+                                                                console.log("[Overlay Click] Clip:", clip.id);
+                                                                e.preventDefault();
+                                                                e.stopPropagation();
+                                                                handleOverlayPointerDown(e, clip.id, 'move');
+                                                            }}
+                                                            onPointerMove={handleOverlayPointerMove}
+                                                            onPointerUp={handleOverlayPointerUp}
+                                                            className="absolute group bg-transparent pointer-events-auto cursor-move select-none"
+                                                            style={{
+                                                                left: `${position.x}%`,
+                                                                top: `${position.y}%`,
+                                                                transform: `translate(-50%, -50%) scale(${scale})`,
+                                                                zIndex: isSelected ? 3002 : 3001,
+                                                                maxWidth: 'none',
+                                                                maxHeight: 'none',
+                                                                ...sizeStyle
+                                                            }}
+                                                        >
+                                                            {/* Visual Border Box (CapCut Style) */}
+                                                            <div className={`w-full h-full border-2 transition-colors relative ${isSelected ? 'border-white bg-white/10' : 'border-transparent hover:border-white/50'}`}>
+                                                                {isSelected && (
+                                                                    <>
+                                                                        <div className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white rounded-full shadow-sm" />
+                                                                        <div className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white rounded-full shadow-sm" />
+                                                                        <div className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white rounded-full shadow-sm" />
+                                                                        <div
+                                                                            className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white rounded-full shadow-sm cursor-nwse-resize pointer-events-auto"
+                                                                            onPointerDown={(e) => {
+                                                                                console.log("[Resize Handle] Clip:", clip.id);
+                                                                                e.preventDefault();
+                                                                                e.stopPropagation();
+                                                                                handleOverlayPointerDown(e, clip.id, 'resize');
+                                                                            }}
+                                                                        />
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })
+                                            }
                                         </div>
                                     </>
                                 ) : (
@@ -2528,11 +2874,11 @@ export default function SubtitleMakerPage() {
                                     </button>
 
                                     <button
-                                        onClick={() => setIsAudioSeparated(!isAudioSeparated)}
+                                        onClick={() => isAudioSeparated ? relinkAllAudio() : separateAllAudio()}
                                         className={`flex items-center gap-2 px-3 py-1.5 rounded-lg font-bold text-sm transition-all shadow-md ${isAudioSeparated
                                             ? 'bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 border border-orange-200 dark:border-orange-800'
                                             : 'bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-zinc-700'}`}
-                                        title={isAudioSeparated ? "오디오 분리됨 (독립 편집)" : "오디오 연결됨 (함께 편집)"}
+                                        title={isAudioSeparated ? "오디오 분리됨 (클릭하여 연결)" : "오디오 연결됨 (클릭하여 분리)"}
                                     >
                                         {isAudioSeparated ? <Unlink className="h-3.5 w-3.5" /> : <Link className="h-3.5 w-3.5" />}
                                         {isAudioSeparated ? '분리됨' : '연결됨'}
@@ -2622,98 +2968,139 @@ export default function SubtitleMakerPage() {
                                 </div>
                             </div>
 
-                            {/* List Header */}
-                            <div className="flex items-center px-4 py-3 border-b border-gray-100 dark:border-zinc-800 text-xs font-bold text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-zinc-950/30">
-                                <div className="w-12 text-center">#</div>
-                                <div className="flex-1 pl-4">내용</div>
-                                <div className="w-24 text-center">효과</div>
-                                <div className="w-16 text-center">크기</div>
-                                <div className="w-24 text-center">폰트</div>
-                                <div className="w-12 text-center">{isCutMode ? 'ON/OFF' : '삭제'}</div>
-                            </div>
+                            {/* Subtitle Table Toggle Button */}
+                            <button
+                                onClick={() => setIsSubtitleTableOpen(prev => !prev)}
+                                className={`w-full flex items-center justify-center gap-2 py-2 border-b border-gray-100 dark:border-zinc-800 text-sm font-medium transition-colors ${subtitles.length > 0 || isSubtitleTableOpen
+                                    ? 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400'
+                                    : 'bg-gray-50 dark:bg-zinc-900 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-zinc-800'
+                                    }`}
+                            >
+                                {subtitles.length > 0 || isSubtitleTableOpen ? (
+                                    <>
+                                        <ChevronUp className="h-4 w-4" />
+                                        자막 테이블 접기 ({subtitles.length}개)
+                                    </>
+                                ) : (
+                                    <>
+                                        <ChevronDown className="h-4 w-4" />
+                                        자막 테이블 펼치기
+                                    </>
+                                )}
+                            </button>
+
+                            {/* List Header - show when subtitles exist OR table is manually opened */}
+                            {(subtitles.length > 0 || isSubtitleTableOpen) && (
+                                <div className="flex items-center px-4 py-3 border-b border-gray-100 dark:border-zinc-800 text-xs font-bold text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-zinc-950/30">
+                                    <div className="w-12 text-center">#</div>
+                                    <div className="flex-1 pl-4">내용</div>
+                                    <div className="w-24 text-center">효과</div>
+                                    <div className="w-16 text-center">크기</div>
+                                    <div className="w-24 text-center">폰트</div>
+                                    <div className="w-12 text-center">{isCutMode ? 'ON/OFF' : '삭제'}</div>
+                                </div>
+                            )}
                         </div>
 
-                        {/* Timeline List */}
-                        <div className="p-2 space-y-1">
-                            {subtitles.length === 0 ? (
-                                <div className="py-20 flex flex-col items-center justify-center text-gray-400 opacity-60">
-                                    <Wand2 className="h-12 w-12 mb-4" />
-                                    <p>대본과 영상을 넣고 'AI 자막 생성'을 눌러주세요</p>
-                                </div>
-                            ) : (
-                                subtitles.map((sub, index) => (
-                                    <SubtitleRow
-                                        key={sub.id}
-                                        sub={sub}
-                                        index={index}
-                                        isActive={currentTime >= sub.startTime && currentTime <= sub.endTime}
-                                        isExcluded={excludedSubtitleIds.has(sub.id)}
-                                        isCutMode={isCutMode}
-                                        currentTime={currentTime}
-                                        onSeek={handleTimelineSeek}
-                                        onUpdate={handleUpdateSubtitleObject}
-                                        onDelete={handleDeleteSubtitle}
-                                        onToggleExclude={handleToggleExclude}
-                                        onSplit={handleSplitByCursor}
-                                        onMergeNext={handleMergeNext}
-                                        onMergePrev={handleMergePrev}
-                                        FONT_SIZES={FONT_SIZES}
-                                        FONT_FAMILIES={FONT_FAMILIES}
-                                        ANIMATION_STYLES={ANIMATION_STYLES}
-                                        onHoverStart={(startTime, endTime, x, y) => {
-                                            if (!isDragging && !isResizing && !isPlaying && !activeWordMenu) {
+                        {/* Timeline List - show when subtitles exist OR table is manually opened */}
+                        {(subtitles.length > 0 || isSubtitleTableOpen) ? (
+                            <div className="p-2 space-y-1">
+                                {subtitles.length === 0 ? (
+                                    /* Empty state when table is manually opened */
+                                    <div className="py-8 flex flex-col items-center justify-center text-gray-400">
+                                        <Type className="h-8 w-8 mb-3 opacity-50" />
+                                        <p className="text-sm mb-3">자막이 없습니다</p>
+                                        <button
+                                            onClick={() => {
+                                                const newSubtitle = {
+                                                    id: `sub-${Date.now()}`,
+                                                    startTime: currentTime,
+                                                    endTime: Math.min(currentTime + 3, duration || currentTime + 3),
+                                                    text: '새 자막',
+                                                };
+                                                updateSubtitlesWithHistory([...subtitles, newSubtitle]);
+                                            }}
+                                            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-bold transition-colors"
+                                        >
+                                            <Plus className="h-4 w-4" />
+                                            자막 추가
+                                        </button>
+                                    </div>
+                                ) : (
+                                    subtitles.map((sub, index) => (
+                                        <SubtitleRow
+                                            key={sub.id}
+                                            sub={sub}
+                                            index={index}
+                                            isActive={currentTime >= sub.startTime && currentTime <= sub.endTime}
+                                            isExcluded={excludedSubtitleIds.has(sub.id)}
+                                            isCutMode={isCutMode}
+                                            currentTime={currentTime}
+                                            onSeek={handleTimelineSeek}
+                                            onUpdate={handleUpdateSubtitleObject}
+                                            onDelete={handleDeleteSubtitle}
+                                            onToggleExclude={handleToggleExclude}
+                                            onSplit={handleSplitByCursor}
+                                            onMergeNext={handleMergeNext}
+                                            onMergePrev={handleMergePrev}
+                                            FONT_SIZES={FONT_SIZES}
+                                            FONT_FAMILIES={FONT_FAMILIES}
+                                            ANIMATION_STYLES={ANIMATION_STYLES}
+                                            onHoverStart={(startTime, endTime, x, y) => {
+                                                if (!isDragging && !isResizing && !isPlaying && !activeWordMenu) {
+                                                    if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+                                                    hoverTimeoutRef.current = setTimeout(() => {
+                                                        setHoveredSubtitle({
+                                                            id: sub.id,
+                                                            startTime: startTime,
+                                                            endTime: endTime,
+                                                            x,
+                                                            y
+                                                        });
+                                                    }, 500);
+                                                }
+                                            }}
+                                            onHoverEnd={() => {
                                                 if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
-                                                hoverTimeoutRef.current = setTimeout(() => {
-                                                    setHoveredSubtitle({
-                                                        id: sub.id,
-                                                        startTime: startTime,
-                                                        endTime: endTime,
+                                                setHoveredSubtitle(null);
+                                            }}
+                                            onWordClick={(word, startTime, endTime, x, y, wordIdx) => {
+                                                if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+                                                setHoveredSubtitle(null);
+
+                                                // If already detail editing this subtitle, just switch the word
+                                                if (detailEditState?.subtitleId === sub.id) {
+                                                    setDetailEditState({
+                                                        subtitleId: sub.id,
+                                                        wordIndex: wordIdx
+                                                    });
+                                                    setActiveWordMenu(null);
+                                                } else {
+                                                    // Otherwise open the menu
+                                                    setActiveWordMenu({
+                                                        subtitleId: sub.id,
+                                                        wordIndex: wordIdx,
+                                                        word,
+                                                        startTime,
+                                                        endTime,
                                                         x,
                                                         y
                                                     });
-                                                }, 500);
-                                            }
-                                        }}
-                                        onHoverEnd={() => {
-                                            if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
-                                            setHoveredSubtitle(null);
-                                        }}
-                                        onWordClick={(word, startTime, endTime, x, y, wordIdx) => {
-                                            if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
-                                            setHoveredSubtitle(null);
-
-                                            // If already detail editing this subtitle, just switch the word
-                                            if (detailEditState?.subtitleId === sub.id) {
-                                                setDetailEditState({
-                                                    subtitleId: sub.id,
-                                                    wordIndex: wordIdx
-                                                });
-                                                setActiveWordMenu(null);
-                                            } else {
-                                                // Otherwise open the menu
-                                                setActiveWordMenu({
-                                                    subtitleId: sub.id,
-                                                    wordIndex: wordIdx,
-                                                    word,
-                                                    startTime,
-                                                    endTime,
-                                                    x,
-                                                    y
-                                                });
-                                            }
-                                        }}
-                                        // Detail Edit props
-                                        audioUrl={videoUrl || undefined}
-                                        isDetailMode={detailEditState?.subtitleId === sub.id}
-                                        editingWordIndex={detailEditState?.subtitleId === sub.id ? detailEditState.wordIndex : undefined}
-                                        onCloseDetail={() => setDetailEditState(null)}
-                                        onWordUpdate={(word: any, start: number, end: number) => {
-                                            if (detailEditState) handleWordSyncUpdate(detailEditState.subtitleId, detailEditState.wordIndex, start, end);
-                                        }}
-                                    />
-                                ))
-                            )}
-                        </div>
+                                                }
+                                            }}
+                                            // Detail Edit props
+                                            audioUrl={videoUrl || undefined}
+                                            isDetailMode={detailEditState?.subtitleId === sub.id}
+                                            editingWordIndex={detailEditState?.subtitleId === sub.id ? detailEditState.wordIndex : undefined}
+                                            onCloseDetail={() => setDetailEditState(null)}
+                                            onWordUpdate={(word: any, start: number, end: number) => {
+                                                if (detailEditState) handleWordSyncUpdate(detailEditState.subtitleId, detailEditState.wordIndex, start, end);
+                                            }}
+                                        />
+                                    ))
+                                )}
+                            </div>
+                        ) : null}
 
                         {/* Word Edit Menu Overlay */}
                         {activeWordMenu && (
@@ -2778,41 +3165,79 @@ export default function SubtitleMakerPage() {
 
                         {/* Visual Timeline Section (Moved inside Right Column) */}
                         {videoUrl && (
-                            <div className="border-t border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 rounded-b-2xl">
-                                <TimelineEditor
-                                    duration={duration}
-                                    subtitles={subtitles}
-                                    onUpdateSubtitle={(id, start, end) => {
-                                        updateSubtitlesWithHistory(prev => prev.map(s =>
-                                            s.id === id ? { ...s, startTime: start, endTime: end } : s
-                                        ));
-                                    }}
-                                    onSeek={handleTimelineSeek}
-                                    excludedSubtitleIds={excludedSubtitleIds}
-                                    onToggleExclude={handleToggleExclude}
-                                    videoElement={mainVideoElement}
-                                    currentTime={playbackTime} // Drive with verified playbackTime
-                                    videoFileName={videoFile?.name}
-                                    isPlaying={isPlaying}
-                                    onPlayPause={togglePlay}
-                                    onSplitSubtitle={handleSplitByTime}
-                                    onDeleteSubtitle={handleDeleteSubtitle}
-                                    videoClips={videoClips}
-                                    onUpdateVideoClips={updateVideoClipsWithHistory}
-                                    audioClips={audioClips}
-                                    onUpdateAudioClips={updateAudioClipsWithHistory}
-                                    isAudioSeparated={isAudioSeparated}
-                                    onFrameExtractionChange={(isExtracting) => {
-                                        isExtractingFramesRef.current = isExtracting;
-                                        if (isExtracting && videoRef.current) {
-                                            videoRef.current.pause();
-                                            setIsPlaying(false);
-                                        }
-                                    }}
-                                    isCutMode={isCutMode}
-                                    onDropFile={handleTimelineDrop}
-                                />
-                            </div>
+                            <>
+                                {/* Resizable Divider Handle - show when subtitle table is open */}
+                                {(subtitles.length > 0 || isSubtitleTableOpen) && (
+                                    <div
+                                        className={`h-2 cursor-ns-resize flex items-center justify-center border-t border-gray-200 dark:border-zinc-700 hover:bg-indigo-100 dark:hover:bg-indigo-900/30 transition-colors ${isResizingTimeline ? 'bg-indigo-200 dark:bg-indigo-800' : 'bg-gray-100 dark:bg-zinc-800'}`}
+                                        onMouseDown={(e) => {
+                                            e.preventDefault();
+                                            setIsResizingTimeline(true);
+                                            resizeStartY.current = e.clientY;
+                                            resizeStartHeight.current = timelineHeight;
+
+                                            const handleMouseMove = (moveEvent: MouseEvent) => {
+                                                const deltaY = resizeStartY.current - moveEvent.clientY; // Up = bigger
+                                                const newHeight = Math.max(100, Math.min(600, resizeStartHeight.current + deltaY));
+                                                setTimelineHeight(newHeight);
+                                            };
+
+                                            const handleMouseUp = () => {
+                                                setIsResizingTimeline(false);
+                                                window.removeEventListener('mousemove', handleMouseMove);
+                                                window.removeEventListener('mouseup', handleMouseUp);
+                                            };
+
+                                            window.addEventListener('mousemove', handleMouseMove);
+                                            window.addEventListener('mouseup', handleMouseUp);
+                                        }}
+                                    >
+                                        <div className="w-8 h-1 bg-gray-300 dark:bg-zinc-600 rounded-full" />
+                                    </div>
+                                )}
+                                <div
+                                    className={`border-t border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 rounded-b-2xl overflow-hidden ${!(subtitles.length > 0 || isSubtitleTableOpen) ? 'flex-1' : ''}`}
+                                    style={(subtitles.length > 0 || isSubtitleTableOpen) ? { height: timelineHeight } : undefined}
+                                >
+                                    <TimelineEditor
+                                        duration={duration}
+                                        subtitles={subtitles}
+                                        onUpdateSubtitle={(id, start, end) => {
+                                            updateSubtitlesWithHistory(prev => prev.map(s =>
+                                                s.id === id ? { ...s, startTime: start, endTime: end } : s
+                                            ));
+                                        }}
+                                        onSeek={handleTimelineSeek}
+                                        excludedSubtitleIds={excludedSubtitleIds}
+                                        onToggleExclude={handleToggleExclude}
+                                        videoElement={mainVideoElement}
+                                        currentTime={playbackTime}
+                                        videoFileName={videoFile?.name}
+                                        isPlaying={isPlaying}
+                                        onPlayPause={togglePlay}
+                                        onSplitSubtitle={handleSplitByTime}
+                                        onDeleteSubtitle={handleDeleteSubtitle}
+                                        videoClips={videoClips}
+                                        onUpdateVideoClips={updateVideoClipsWithHistory}
+                                        audioClips={audioClips}
+                                        onUpdateAudioClips={updateAudioClipsWithHistory}
+                                        isAudioSeparated={isAudioSeparated}
+                                        onFrameExtractionChange={(isExtracting) => {
+                                            isExtractingFramesRef.current = isExtracting;
+                                            if (isExtracting && videoRef.current) {
+                                                videoRef.current.pause();
+                                                setIsPlaying(false);
+                                            }
+                                        }}
+                                        isCutMode={isCutMode}
+                                        onDropFile={handleTimelineDrop}
+                                        onUndo={handleUndo}
+                                        onRedo={handleRedo}
+                                        canUndo={historyIndex > 0}
+                                        canRedo={historyIndex < history.length - 1}
+                                    />
+                                </div>
+                            </>
                         )}
                     </div>
                 </div>
@@ -2936,15 +3361,17 @@ export default function SubtitleMakerPage() {
 
 
             {/* Video Preview Tooltip (Global) */}
-            {hoveredSubtitle && videoUrl && (
-                <VideoPreviewTooltip
-                    src={videoUrl}
-                    startTime={hoveredSubtitle.startTime}
-                    endTime={hoveredSubtitle.endTime}
-                    x={hoveredSubtitle.x}
-                    y={hoveredSubtitle.y}
-                />
-            )}
+            {
+                hoveredSubtitle && videoUrl && (
+                    <VideoPreviewTooltip
+                        src={videoUrl}
+                        startTime={hoveredSubtitle.startTime}
+                        endTime={hoveredSubtitle.endTime}
+                        x={hoveredSubtitle.x}
+                        y={hoveredSubtitle.y}
+                    />
+                )
+            }
             {/* --- Apple Confirm Modal --- */}
             <AppleConfirmModal
                 isOpen={confirmState.isOpen}

@@ -1,5 +1,0 @@
-2026/01/11-16:13:45.589 9dcc Creating DB C:\tubiq-web\chrome-profiles\grok-10\Profile 1\Local Storage\leveldb since it was missing.
-2026/01/11-16:13:45.887 9dcc Reusing MANIFEST C:\tubiq-web\chrome-profiles\grok-10\Profile 1\Local Storage\leveldb/MANIFEST-000001
-2026/01/11-16:14:45.954 8140 Level-0 table #5: started
-2026/01/11-16:14:45.959 8140 Level-0 table #5: 57780 bytes OK
-2026/01/11-16:14:45.960 8140 Delete type=0 #3

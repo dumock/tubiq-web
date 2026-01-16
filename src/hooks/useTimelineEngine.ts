@@ -18,6 +18,40 @@ interface UseTimelineEngineProps {
     duration: number;
 }
 
+// Helper: Apply proxy for CORS with http URLs
+function getProxiedUrl(src: string | undefined): string {
+    if (!src) return '';
+    return src.startsWith('http')
+        ? `/api/proxy-video?url=${encodeURIComponent(src)}`
+        : src;
+}
+
+// Helper: Compare URLs (handles proxy vs original)
+function isSameSource(currentSrc: string, targetSrc: string): boolean {
+    if (!currentSrc || !targetSrc) return false;
+
+    // Extract original URL from proxy if needed
+    const extractOriginal = (url: string): string => {
+        if (url.includes('/api/proxy-video?url=')) {
+            const match = url.match(/url=([^&]+)/);
+            if (match) return decodeURIComponent(match[1]);
+        }
+        return url;
+    };
+
+    const original1 = extractOriginal(currentSrc);
+    const original2 = extractOriginal(targetSrc);
+
+    // Compare by pathname to handle query params differences
+    try {
+        const url1 = new URL(original1);
+        const url2 = new URL(original2);
+        return url1.pathname === url2.pathname;
+    } catch {
+        return original1 === original2;
+    }
+}
+
 export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration }: UseTimelineEngineProps) {
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
@@ -33,91 +67,84 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
             // Advance Master Time
             setCurrentTime(prevTime => {
                 let newTime = prevTime + deltaTime;
-                if (newTime >= duration) {
+
+                // Calculate effective duration: use max clip endTime if clips exist
+                const maxClipEnd = videoClips.length > 0
+                    ? Math.max(...videoClips.map(c => c.endTime))
+                    : duration;
+                const effectiveDuration = Math.max(duration, maxClipEnd);
+
+                // DEBUG: Log every second
+                if (Math.floor(newTime) !== Math.floor(prevTime)) {
+                    console.log('[Engine] animate:', {
+                        newTime: newTime.toFixed(2),
+                        effectiveDuration,
+                        clipCount: videoClips.length,
+                        hasVideoRef: !!videoRef.current
+                    });
+                }
+
+                if (newTime >= effectiveDuration && effectiveDuration > 0) {
+                    console.log('[Engine] Reached end, stopping:', { newTime, effectiveDuration });
                     setIsPlaying(false);
-                    return duration; // or 0 to loop
+                    return effectiveDuration; // or 0 to loop
                 }
 
                 // --- SEQUENCING LOGIC ---
                 const video = videoRef.current;
+
+                // Handle main video element ONLY if it exists (V1 has content)
                 if (video) {
-                    // 1. Find which clip we are in (Layer 0 priority)
-                    const activeClip = videoClips.find(clip =>
-                        newTime >= clip.startTime &&
-                        newTime < clip.endTime &&
-                        (clip.layer === 0 || clip.layer === undefined)
+                    // 1. Find ALL active clips at current time (any layer)
+                    const allActiveClips = videoClips.filter(clip =>
+                        newTime >= clip.startTime && newTime < clip.endTime
                     );
 
-                    if (activeClip) {
-                        // 1.5 CHECK SOURCE
-                        // Dynamic Source Switching: If src changed, load new source
-                        if (activeClip.src) {
+                    // 1b. Find main video clip (Layer 0) - this controls the main video element
+                    const mainClip = allActiveClips.find(clip =>
+                        clip.layer === 0 || clip.layer === undefined
+                    );
+
+                    // 2. Handle main video element (Layer 0)
+                    if (mainClip) {
+                        // Dynamic Source Switching
+                        if (mainClip.src) {
                             const currentSrc = video.currentSrc || video.src;
-                            // Robust URL comparison - extract pathname for comparison
-                            let needsSwitch = false;
-                            try {
-                                const currentUrl = new URL(currentSrc);
-                                const targetUrl = new URL(activeClip.src);
-                                // Compare pathnames (ignores query params like tokens)
-                                needsSwitch = currentUrl.pathname !== targetUrl.pathname;
-                            } catch {
-                                // If URL parsing fails, do string comparison
-                                needsSwitch = currentSrc !== activeClip.src && !currentSrc.includes(activeClip.src);
-                            }
+                            const needsSwitch = !isSameSource(currentSrc, mainClip.src);
 
                             if (needsSwitch) {
-                                console.log('[Engine] Switching Source for clip:', {
-                                    clipId: activeClip.id?.substring(0, 8),
-                                    startTime: activeClip.startTime,
-                                    endTime: activeClip.endTime,
-                                    src: activeClip.src.substring(0, 80)
-                                });
-                                video.src = activeClip.src;
-                                // After changing src, we MUST wait for metadata or just seek?
-                                // Usually setting src resets everything.
-                                // We rely on the seek logic below to set time.
+                                console.log('[Engine] Switching Source for clip:', mainClip.id?.substring(0, 8));
+                                video.src = getProxiedUrl(mainClip.src);
                             }
                         }
 
-                        // 2. Calculate where the video SHOULD be
-                        // offset = (Current Master Time - Clip Start Time)
-                        // Target Video Time = Clip Source Start + offset
-                        const offset = newTime - activeClip.startTime;
-                        const targetVideoTime = activeClip.sourceStart + offset;
+                        // Calculate target time and sync
+                        const offset = newTime - mainClip.startTime;
+                        const targetVideoTime = mainClip.sourceStart + offset;
 
-                        // 3. Check drift / cut
-                        // If the video is paused or far away, seek it.
-                        // Optimization: Tolerance of ~0.1s (approx 3 frames at 30fps)
-                        // Also check if we just switched source (readyState might be 0)
                         if (Math.abs(video.currentTime - targetVideoTime) > 0.15 || video.readyState < 2) {
-                            // Safe seek
                             try {
                                 video.currentTime = targetVideoTime;
                             } catch (e) { /* ignore seek before ready */ }
-
-                            // If video was paused (gap or just started), play it
                             if (video.paused && video.readyState >= 3) {
                                 video.play().catch(e => console.warn("Auto-play blocked", e));
                             }
                         } else {
-                            // If we are "close enough", we trust the video playback speed 
-                            // BUT we must ensure it IS playing.
                             if (video.paused && video.readyState >= 3) {
                                 video.play().catch(() => { });
                             }
-                            // Speed Match (optional): video.playbackRate = 1.0;
                         }
                     } else {
-                        // GAP: No clip here.
-                        // Pause the video (show black or last frame?)
+                        // No main clip (V1 empty) - pause main video but KEEP TIMELINE RUNNING
                         if (!video.paused) {
                             video.pause();
                         }
-                        // Ideally show black screen (hide video layer opacity)
                     }
                 }
+                // NOTE: Removed the closing brace that was blocking onTimeUpdate
 
-                // Sync UI
+                // CRITICAL: Sync UI ALWAYS - regardless of whether video element exists
+                // This ensures playhead moves for V2-only, audio-only, etc.
                 onTimeUpdate(newTime);
                 return newTime;
             });
@@ -143,40 +170,56 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
     }, [isPlaying, animate, videoRef]);
 
     const play = useCallback(() => {
-        // Initialize video source for the active clip at currentTime before starting
+        console.log('[Engine] play() called, clips:', videoClips.length);
+
+        // Find Layer 0 (main video) clip at current time
+        const mainClip = videoClips.find(clip =>
+            currentTime >= clip.startTime && currentTime < clip.endTime &&
+            (clip.layer === 0 || clip.layer === undefined)
+        );
+
         const video = videoRef.current;
-        if (video && videoClips.length > 0) {
-            const activeClip = videoClips.find(clip =>
-                currentTime >= clip.startTime && currentTime < clip.endTime
-            ) || videoClips[0]; // Fallback to first clip
 
-            if (activeClip?.src) {
-                const currentSrc = video.currentSrc || video.src;
-                let needsSwitch = !currentSrc;
-                if (currentSrc && activeClip.src) {
-                    try {
-                        const currentUrl = new URL(currentSrc);
-                        const targetUrl = new URL(activeClip.src);
-                        needsSwitch = currentUrl.pathname !== targetUrl.pathname;
-                    } catch {
-                        needsSwitch = currentSrc !== activeClip.src;
-                    }
-                }
+        // Only sync mainVideoRef if there's a Layer 0 clip AND video element exists
+        if (video && mainClip?.src) {
+            const currentSrc = video.currentSrc || video.src;
+            const needsSwitch = !currentSrc || !isSameSource(currentSrc, mainClip.src);
 
-                if (needsSwitch) {
-                    console.log('[Engine] Play: Initializing source:', activeClip.src.substring(0, 100));
-                    video.src = activeClip.src;
-                }
-
-                // Seek to correct position in the source
-                const targetVideoTime = activeClip.sourceStart + (currentTime - activeClip.startTime);
-                video.currentTime = Math.max(0, targetVideoTime);
-
-                // Start video playback
-                video.play().catch(e => console.warn('[Engine] Auto-play blocked:', e));
+            if (needsSwitch) {
+                console.log('[Engine] Play: Setting main video source');
+                video.src = getProxiedUrl(mainClip.src);
             }
+
+            // Seek to correct position in the source
+            const targetVideoTime = mainClip.sourceStart + (currentTime - mainClip.startTime);
+            video.currentTime = Math.max(0, targetVideoTime);
+
+            // Wait for video to be ready, then start
+            if (video.readyState >= 3) {
+                video.play().catch(e => console.warn('[Engine] Auto-play blocked:', e));
+                setIsPlaying(true);
+            } else {
+                console.log('[Engine] Waiting for main video ready...');
+                const onCanPlay = () => {
+                    video.removeEventListener('canplay', onCanPlay);
+                    video.play().catch(e => console.warn('[Engine] Auto-play blocked:', e));
+                    setIsPlaying(true);
+                };
+                video.addEventListener('canplay', onCanPlay);
+                // Fallback timeout
+                setTimeout(() => {
+                    video.removeEventListener('canplay', onCanPlay);
+                    if (!video.paused) return;
+                    console.log('[Engine] Fallback: starting without canplay');
+                    video.play().catch(() => { });
+                    setIsPlaying(true);
+                }, 500);
+            }
+        } else {
+            // No Layer 0 clip or no video element - start timeline immediately for V2+/audio only
+            console.log('[Engine] No main clip, starting timeline for V2+/audio');
+            setIsPlaying(true);
         }
-        setIsPlaying(true);
     }, [videoRef, videoClips, currentTime]);
     const pause = useCallback(() => {
         setIsPlaying(false);
@@ -199,32 +242,23 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
         const video = videoRef.current;
         if (video) {
             const activeClip = videoClips.find(clip =>
-                time >= clip.startTime && time < clip.endTime
+                time >= clip.startTime && time < clip.endTime &&
+                (clip.layer === 0 || clip.layer === undefined)
             );
             if (activeClip) {
                 // Check if we need to switch source
                 if (activeClip.src) {
                     const currentSrc = video.currentSrc || video.src;
-                    let needsSwitch = false;
-                    try {
-                        const currentUrl = new URL(currentSrc);
-                        const targetUrl = new URL(activeClip.src);
-                        needsSwitch = currentUrl.pathname !== targetUrl.pathname;
-                    } catch {
-                        needsSwitch = currentSrc !== activeClip.src && !currentSrc.includes(activeClip.src);
-                    }
+                    const needsSwitch = !isSameSource(currentSrc, activeClip.src);
 
                     if (needsSwitch) {
                         console.log('[Engine] Seek: Switching Source:', activeClip.src.substring(0, 100));
-                        video.src = activeClip.src;
+                        video.src = getProxiedUrl(activeClip.src);
                     }
                 }
 
                 const targetVideoTime = activeClip.sourceStart + (time - activeClip.startTime);
                 video.currentTime = targetVideoTime;
-            } else {
-                // In gap
-                // video.pause();
             }
         }
     }, [videoClips, onTimeUpdate, videoRef]);
