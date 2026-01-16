@@ -208,6 +208,7 @@ export default function SubtitleMakerPage() {
         videoRef: mainVideoRef, // Connect to main video element
         videoClips,
         duration,
+        shouldMuteVideo: audioClips.length > 0 || videoClips.some(c => c.hasAudio && c.isAudioLinked === false),
         onTimeUpdate: (time) => {
             setPlaybackTime(time);
         }
@@ -1414,36 +1415,59 @@ export default function SubtitleMakerPage() {
                             }
                         }
 
-                        // Apply Preview Position for Overlays
-                        if ((clip.layer || 0) > 0 && clip.previewPosition) {
+                        // Apply Preview Position for ALL clips (V1 included)
+                        if (clip.previewPosition) {
                             const { x, y } = clip.previewPosition;
                             const scale = clip.scale || 1;
 
-                            // Base Size: CONTAIN (Fit to Screen 100%)
-                            let baseW = width;
-                            let baseH = height;
+                            // For V1 (layer 0): Keep the contain sizing already calculated above
+                            // Only adjust position based on previewPosition offset from center (50%, 50%)
+                            if ((clip.layer || 0) === 0) {
+                                // Calculate offset from center (default position is 50%, 50%)
+                                const offsetX = ((x - 50) / 100) * width;
+                                const offsetY = ((y - 50) / 100) * height;
 
-                            // Use stored ratio if available, else derive from element or default
-                            const aspect = clip.ratio || (videoEl.videoWidth / videoEl.videoHeight) || (16 / 9);
+                                // Apply offset to contain-calculated position
+                                drawX += offsetX;
+                                drawY += offsetY;
 
-                            // Calculate Contain Dimensions
-                            if (width / height > aspect) {
-                                // Canvas is wider than video -> fit height
-                                baseH = height;
-                                baseW = height * aspect;
+                                // Apply scale if set
+                                if (scale !== 1) {
+                                    const centerX = drawX + drawW / 2;
+                                    const centerY = drawY + drawH / 2;
+                                    drawW *= scale;
+                                    drawH *= scale;
+                                    drawX = centerX - drawW / 2;
+                                    drawY = centerY - drawH / 2;
+                                }
                             } else {
-                                // Canvas is taller than video -> fit width
-                                baseW = width;
-                                baseH = width / aspect;
+                                // For overlays (V2+): Use full position/scale logic
+                                // Base Size: CONTAIN (Fit to Screen 100%)
+                                let baseW = width;
+                                let baseH = height;
+
+                                // Use stored ratio if available, else derive from element or default
+                                const aspect = clip.ratio || (videoEl.videoWidth / videoEl.videoHeight) || (16 / 9);
+
+                                // Calculate Contain Dimensions
+                                if (width / height > aspect) {
+                                    // Canvas is wider than video -> fit height
+                                    baseH = height;
+                                    baseW = height * aspect;
+                                } else {
+                                    // Canvas is taller than video -> fit width
+                                    baseW = width;
+                                    baseH = width / aspect;
+                                }
+
+                                // Apply Scale
+                                drawW = baseW * scale;
+                                drawH = baseH * scale;
+
+                                // Position (Center)
+                                drawX = (x / 100) * width - (drawW / 2);
+                                drawY = (y / 100) * height - (drawH / 2);
                             }
-
-                            // Apply Scale
-                            drawW = baseW * scale;
-                            drawH = baseH * scale;
-
-                            // Position (Center)
-                            drawX = (x / 100) * width - (drawW / 2);
-                            drawY = (y / 100) * height - (drawH / 2);
                         }
 
                         ctx.drawImage(videoEl, drawX, drawY, drawW, drawH);
@@ -1466,7 +1490,7 @@ export default function SubtitleMakerPage() {
     // We unmute all active overlays to allow mixing, or handle volume.
     // Assuming simple mixing for now.
 
-    // Sync V1 (mainVideoElement) mute state with clip isMuted
+    // Sync V1 (mainVideoElement) mute state with clip audio state
     useEffect(() => {
         const video = mainVideoRef.current || mainVideoElement;
         if (!video) return;
@@ -1475,13 +1499,16 @@ export default function SubtitleMakerPage() {
         const v1Clips = videoClips.filter(c => (c.layer || 0) === 0);
         const isV1Muted = v1Clips.some(c => c.isMuted);
 
-        // Also mute video if separated audio exists (to prevent echo)
+        // Also mute video if audio has been separated (isAudioLinked = false)
+        const hasUnlinkedAudio = v1Clips.some(c => c.hasAudio && c.isAudioLinked === false);
+
+        // Also check if separated audio clips exist (legacy check)
         const hasSeparatedAudio = audioClips.length > 0;
 
         // Force apply mute state directly to video element
-        const shouldMute = isV1Muted || hasSeparatedAudio;
+        const shouldMute = isV1Muted || hasUnlinkedAudio || hasSeparatedAudio;
         video.muted = shouldMute;
-        console.log('[Mute Sync] V1 muted:', isV1Muted, 'hasSeparatedAudio:', hasSeparatedAudio, 'video.muted:', video.muted);
+        console.log('[Mute Sync] V1 muted:', isV1Muted, 'hasUnlinkedAudio:', hasUnlinkedAudio, 'hasSeparatedAudio:', hasSeparatedAudio, 'video.muted:', video.muted);
     }, [mainVideoElement, videoClips, audioClips]);
 
     // Audio Engine (for Separated Audio)
@@ -2246,6 +2273,69 @@ export default function SubtitleMakerPage() {
         resizeStartData.current = null;
     };
 
+    // Handle overlay drag/resize at document level to avoid infinite re-render loops
+    useEffect(() => {
+        if (!draggingOverlayId && !resizingOverlayId) return;
+
+        const handleDocumentPointerMove = (e: PointerEvent) => {
+            if (!videoContainerRef.current || !resizeStartData.current) return;
+            const container = videoContainerRef.current;
+            const rect = container.getBoundingClientRect();
+
+            // Handle Resizing
+            if (resizingOverlayId) {
+                const { startDist, startScale } = resizeStartData.current;
+                const clip = videoClips.find(c => c.id === resizingOverlayId);
+                if (clip) {
+                    const center = clip.previewPosition || { x: 50, y: 50 };
+                    const centerX = rect.left + (rect.width * (center.x / 100));
+                    const centerY = rect.top + (rect.height * (center.y / 100));
+                    const curDist = Math.hypot(e.clientX - centerX, e.clientY - centerY);
+                    const scaleFactor = curDist / startDist;
+                    const newScale = Math.max(0.1, startScale * scaleFactor);
+
+                    setVideoClips(prev => prev.map(c =>
+                        c.id === resizingOverlayId ? { ...c, scale: newScale } : c
+                    ));
+                }
+                return;
+            }
+
+            // Handle Moving
+            if (draggingOverlayId) {
+                const { startX, startY, startPos } = resizeStartData.current;
+                const deltaX = e.clientX - startX;
+                const deltaY = e.clientY - startY;
+                const deltaPercentX = (deltaX / rect.width) * 100;
+                const deltaPercentY = (deltaY / rect.height) * 100;
+                const newX = startPos.x + deltaPercentX;
+                const newY = startPos.y + deltaPercentY;
+                const clampedX = Math.max(-100, Math.min(200, newX));
+                const clampedY = Math.max(-100, Math.min(200, newY));
+
+                setVideoClips(prev => prev.map(c =>
+                    c.id === draggingOverlayId
+                        ? { ...c, previewPosition: { x: clampedX, y: clampedY } }
+                        : c
+                ));
+            }
+        };
+
+        const handleDocumentPointerUp = () => {
+            setDraggingOverlayId(null);
+            setResizingOverlayId(null);
+            resizeStartData.current = null;
+        };
+
+        document.addEventListener('pointermove', handleDocumentPointerMove);
+        document.addEventListener('pointerup', handleDocumentPointerUp);
+
+        return () => {
+            document.removeEventListener('pointermove', handleDocumentPointerMove);
+            document.removeEventListener('pointerup', handleDocumentPointerUp);
+        };
+    }, [draggingOverlayId, resizingOverlayId, videoClips]);
+
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-black font-sans text-gray-900 dark:text-gray-100 flex flex-col">
             <Header />
@@ -2449,7 +2539,7 @@ export default function SubtitleMakerPage() {
                                                     crossOrigin="anonymous"
                                                     src={videoUrl ? (videoUrl.startsWith('http') ? `/api/proxy-video?url=${encodeURIComponent(videoUrl)}` : videoUrl) : ''}
                                                     preload="auto"
-                                                    // muted is controlled by useEffect for reliable muting
+                                                    muted={audioClips.length > 0 || videoClips.some(c => c.hasAudio && c.isAudioLinked === false)}
                                                     onTimeUpdate={(e) => {
                                                         const t = e.currentTarget.currentTime;
                                                         setPlaybackTime(t);
@@ -2495,7 +2585,7 @@ export default function SubtitleMakerPage() {
                                                                 src={src}
                                                                 className="hidden"
                                                                 preload="auto"
-                                                                muted={!!clip.isMuted}
+                                                                muted={!!clip.isMuted || clip.isAudioLinked === false || audioClips.length > 0}
                                                                 playsInline
                                                                 onLoadedData={(e) => {
                                                                     // Seek to first frame immediately for preview
@@ -2624,20 +2714,33 @@ export default function SubtitleMakerPage() {
                                         {/* OVERLAY INTERACTION LAYER (TOP OF Z-STACK - z-3000) */}
                                         <div className="absolute inset-0 z-[3000] pointer-events-none">
                                             {videoClips
-                                                .filter(c => (c.layer || 0) > 0 && playbackTime >= c.startTime && playbackTime < c.endTime)
+                                                .filter(c => (c.layer || 0) >= 0 && playbackTime >= c.startTime && playbackTime < c.endTime)
                                                 .map(clip => {
                                                     const position = clip.previewPosition || { x: 50, y: 50 };
                                                     const scale = clip.scale || 1;
                                                     const isSelected = draggingOverlayId === clip.id || resizingOverlayId === clip.id;
 
-                                                    const containerAspect = 9 / 16;
-                                                    const clipAspect = clip.ratio || (16 / 9);
-
+                                                    // V1 (layer 0): Always cover full container since it's the background video
+                                                    // V2+ (overlays): Calculate based on aspect ratio
                                                     let sizeStyle: React.CSSProperties = {};
-                                                    if (clipAspect > containerAspect) {
-                                                        sizeStyle = { width: '100%', height: 'auto', aspectRatio: `${clipAspect}` };
+
+                                                    if ((clip.layer || 0) === 0) {
+                                                        // V1: Full container coverage
+                                                        sizeStyle = { width: '100%', height: '100%' };
                                                     } else {
-                                                        sizeStyle = { height: '100%', width: 'auto', aspectRatio: `${clipAspect}` };
+                                                        // V2+: Calculate based on aspect ratio
+                                                        const containerAspect = 9 / 16;
+                                                        let clipAspect = clip.ratio;
+                                                        if (!clipAspect) {
+                                                            const videoEl = hiddenVideoRefs.current?.get(clip.id);
+                                                            clipAspect = videoEl ? (videoEl.videoWidth / videoEl.videoHeight) : (16 / 9);
+                                                        }
+
+                                                        if (clipAspect > containerAspect) {
+                                                            sizeStyle = { width: '100%', height: 'auto', aspectRatio: `${clipAspect}` };
+                                                        } else {
+                                                            sizeStyle = { height: '100%', width: 'auto', aspectRatio: `${clipAspect}` };
+                                                        }
                                                     }
 
                                                     return (
@@ -2649,8 +2752,6 @@ export default function SubtitleMakerPage() {
                                                                 e.stopPropagation();
                                                                 handleOverlayPointerDown(e, clip.id, 'move');
                                                             }}
-                                                            onPointerMove={handleOverlayPointerMove}
-                                                            onPointerUp={handleOverlayPointerUp}
                                                             className="absolute group bg-transparent pointer-events-auto cursor-move select-none"
                                                             style={{
                                                                 left: `${position.x}%`,

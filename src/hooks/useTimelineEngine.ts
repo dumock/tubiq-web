@@ -16,6 +16,7 @@ interface UseTimelineEngineProps {
     videoClips: VideoClip[];
     onTimeUpdate: (time: number) => void;
     duration: number;
+    shouldMuteVideo?: boolean; // Mute video audio (e.g., when audio is separated)
 }
 
 // Helper: Apply proxy for CORS with http URLs
@@ -52,7 +53,7 @@ function isSameSource(currentSrc: string, targetSrc: string): boolean {
     }
 }
 
-export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration }: UseTimelineEngineProps) {
+export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration, shouldMuteVideo = false }: UseTimelineEngineProps) {
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
     const requestRef = useRef<number | undefined>(undefined);
@@ -127,10 +128,12 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
                                 video.currentTime = targetVideoTime;
                             } catch (e) { /* ignore seek before ready */ }
                             if (video.paused && video.readyState >= 3) {
+                                video.muted = shouldMuteVideo; // Apply mute before play
                                 video.play().catch(e => console.warn("Auto-play blocked", e));
                             }
                         } else {
                             if (video.paused && video.readyState >= 3) {
+                                video.muted = shouldMuteVideo; // Apply mute before play
                                 video.play().catch(() => { });
                             }
                         }
@@ -196,12 +199,14 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
 
             // Wait for video to be ready, then start
             if (video.readyState >= 3) {
+                video.muted = shouldMuteVideo; // Apply mute before play
                 video.play().catch(e => console.warn('[Engine] Auto-play blocked:', e));
                 setIsPlaying(true);
             } else {
                 console.log('[Engine] Waiting for main video ready...');
                 const onCanPlay = () => {
                     video.removeEventListener('canplay', onCanPlay);
+                    video.muted = shouldMuteVideo; // Apply mute before play
                     video.play().catch(e => console.warn('[Engine] Auto-play blocked:', e));
                     setIsPlaying(true);
                 };
@@ -211,6 +216,7 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
                     video.removeEventListener('canplay', onCanPlay);
                     if (!video.paused) return;
                     console.log('[Engine] Fallback: starting without canplay');
+                    video.muted = shouldMuteVideo; // Apply mute before play
                     video.play().catch(() => { });
                     setIsPlaying(true);
                 }, 500);

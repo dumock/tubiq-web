@@ -14,6 +14,8 @@ interface VideoClipItemProps {
     hasMoved?: boolean; // True when drag has moved beyond 5px threshold
     dragOffsetX?: number; // Offset in pixels during drag (horizontal)
     dragOffsetY?: number; // Offset in pixels during drag (vertical - for layer change)
+    trimLeftOffset?: number; // Pixels to trim from left (positive = shorter, negative = longer)
+    trimRightOffset?: number; // Pixels to trim from right (positive = longer, negative = shorter)
     audioWaveformL: number[]; // Audio waveform data for CapCut-style integrated display
     onMouseDown: (e: React.MouseEvent, clip: VideoClip) => void;
     onContextMenu: (e: React.MouseEvent, clip: VideoClip) => void;
@@ -38,6 +40,8 @@ export const VideoClipItem = memo(({
     hasMoved = false, // True when drag has moved beyond threshold
     dragOffsetX = 0, // Offset during drag (X)
     dragOffsetY = 0, // Offset during drag (Y - for layer change)
+    trimLeftOffset = 0, // Real-time left trim offset (pixels)
+    trimRightOffset = 0, // Real-time right trim offset (pixels)
     audioWaveformL, // Audio waveform for CapCut-style display
     onVolumeChange, // Volume change callback
     onMouseDown,
@@ -74,8 +78,11 @@ export const VideoClipItem = memo(({
     const slotWidth = Math.round(videoHeight * aspectRatio);
 
     // Memoize frame slots calculation to prevent recalc on every drag move if source params haven't changed
+    // Use visualWidth (includes trim offsets) to ensure frames fill the entire visible area
+    const visualWidth = Math.max(clipWidth - trimLeftOffset + trimRightOffset, 20);
+
     const frameSlots = React.useMemo(() => {
-        const slotCount = Math.ceil(clipWidth / slotWidth);
+        const slotCount = Math.ceil(visualWidth / slotWidth);
         const clipFrames = clip.frames || [];
 
         // If no frames yet, return empty array (will show placeholder color)
@@ -86,7 +93,11 @@ export const VideoClipItem = memo(({
         const sourceIsGlobal = clipFrames.length === 0;
 
         return Array.from({ length: slotCount }, (_, i) => {
-            const offsetInClip = (i * slotWidth) / pxPerSec; // time offset from start of clip
+            // Account for trim offset when calculating time position
+            // trimLeftOffset < 0 means we're extending left (showing earlier frames)
+            // trimLeftOffset > 0 means we're contracting left (skipping earlier frames)
+            const trimTimeOffset = trimLeftOffset / pxPerSec;
+            const offsetInClip = (i * slotWidth) / pxPerSec - trimTimeOffset;
 
             if (sourceIsGlobal) {
                 // OLD LOGIC: Use global timeline time (fallback)
@@ -100,33 +111,34 @@ export const VideoClipItem = memo(({
                 if (clipDuration <= 0) return '';
 
                 // Map offset (0 to duration) to frame index
-                // Note: We might need to consider source start if frames are extracted only for the USED portion?
-                // But usually we extract for the full duration or at least the relevant part.
-                // Assuming clip.frames covers the currently defined [sourceStart, sourceEnd] range?
-                // Actually, let's assume frames represent the visible range or the full source?
-                // Let's implement extraction for the *used duration* first.
-
-                // If frames extracted for duration:
                 const frameIndex = Math.floor((offsetInClip / clipDuration) * sourceFrames.length);
                 return sourceFrames[Math.min(Math.max(0, frameIndex), sourceFrames.length - 1)] || '';
             }
         });
-    }, [clipWidth, slotWidth, pxPerSec, clip.startTime, clip.sourceStart, clip.sourceEnd, clip.frames, containerDuration, frameThumbnails]);
+    }, [visualWidth, slotWidth, pxPerSec, clip.startTime, clip.sourceStart, clip.sourceEnd, clip.frames, containerDuration, frameThumbnails, trimLeftOffset]);
 
     // Use isDragging directly to ensure clip hides when global clip appears
-    // hasMoved optimization removed to prevent dual-clip issue
+    // But don't hide during trim operations (left/right) - only during move
+    const isMoveDragging = isDragging && trimLeftOffset === 0 && trimRightOffset === 0;
+    const isTrimming = trimLeftOffset !== 0 || trimRightOffset !== 0;
+
+    // Calculate visual dimensions during trim
+    // trimLeftOffset: positive = left edge moves right (clip shorter), negative = left edge moves left (clip longer)
+    // trimRightOffset: positive = right edge moves right (clip longer), negative = right edge moves left (clip shorter)
+    const visualLeft = clip.startTime * pxPerSec + trimLeftOffset;
+    // visualWidth is already calculated above for frameSlots
 
     return (
         <div
-            className={`video-clip absolute inset-y-0 rounded-lg overflow-hidden cursor-pointer group select-none ${isDragging
-                ? 'opacity-0 pointer-events-none' // Hidden during drag - rendered at global level to avoid track clipping
+            className={`video-clip absolute inset-y-0 rounded-lg overflow-hidden cursor-pointer group select-none ${isMoveDragging
+                ? 'opacity-0 pointer-events-none' // Hidden during move drag - rendered at global level to avoid track clipping
                 : 'z-0 border-2' // No transition - instant position update to prevent drop bounce
-                } ${isSelected && !isDragging ? 'border-yellow-400 ring-2 ring-yellow-400 z-10' : !isDragging ? 'border-indigo-500 hover:border-indigo-400' : ''}`}
+                } ${isTrimming ? 'border-yellow-400 ring-2 ring-yellow-400 z-20' : ''} ${isSelected && !isMoveDragging && !isTrimming ? 'border-yellow-400 ring-2 ring-yellow-400 z-10' : !isMoveDragging && !isTrimming ? 'border-indigo-500 hover:border-indigo-400' : ''}`}
             style={{
-                left: clip.startTime * pxPerSec,
-                width: Math.max(clipWidth, 20),
+                left: visualLeft,
+                width: visualWidth,
                 // Apply transform for smooth drag following (both horizontal and vertical)
-                transform: isDragging ? `translate(${dragOffsetX}px, ${dragOffsetY}px)` : undefined,
+                transform: isMoveDragging ? `translate(${dragOffsetX}px, ${dragOffsetY}px)` : undefined,
             }}
             onMouseDown={(e) => {
                 // Block all interactions if clip is locked
@@ -488,6 +500,19 @@ export const UnlinkedAudioClipItem = memo(({
                 ref={canvasRef}
                 className="absolute inset-0 pointer-events-none"
             />
+
+            {/* Yellow Volume Control Line (CapCut style) */}
+            <div
+                className="absolute left-0 right-0 cursor-ns-resize group hover:bg-yellow-400/10"
+                style={{
+                    top: `${Math.max(10, Math.min(90, 60 - ((clip.volume ?? 1) - 1) * 50))}%`,
+                    height: 3,
+                    zIndex: 15
+                }}
+            >
+                <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 bg-yellow-400/60 group-hover:bg-yellow-400 transition-all" style={{ height: '0.5px' }} />
+            </div>
+
             <div className="absolute top-0.5 left-1 text-[8px] text-emerald-300 pointer-events-none">🔊 분리됨</div>
         </div>
     );

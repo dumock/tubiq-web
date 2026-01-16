@@ -40,6 +40,9 @@ export interface AudioClip {
     sourceEnd: number;
     layer?: number; // Audio track layer (0 = A1, 1 = A2, etc.)
     waveform?: number[]; // Per-clip waveform data
+    volume?: number; // Audio volume (0.0 to 2.0, default 1.0 = 100%)
+    src?: string; // Audio source URL (usually same as video source)
+    isMuted?: boolean; // Track-level mute
 }
 
 interface TimelineEditorProps {
@@ -175,6 +178,7 @@ export default function TimelineEditor({
 }: TimelineEditorProps) {
     // Timeline State
     const [pxPerSec, setPxPerSec] = useState(100);
+    const [hasInitializedZoom, setHasInitializedZoom] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const [isDragging, setIsDragging] = useState<{ id: string, type: 'left' | 'right' | 'move', target: 'clip' | 'subtitle' | 'audio', startX: number, originalStart: number, originalEnd: number, currentX?: number, currentY?: number, mouseX?: number, mouseY?: number, screenStartX?: number, screenStartY?: number, screenX?: number, screenY?: number, grabOffsetX?: number, grabOffsetY?: number, stickyLayer?: number, visualOffsetY?: number, originalLayer?: number } | null>(null);
     const isDraggingRef = useRef(isDragging); // Ref to avoid stale closure in event handlers
@@ -248,6 +252,28 @@ export default function TimelineEditor({
         setLocalAudioClips(audioClips);
     }, [audioClips]);
 
+    // Adaptive initial zoom based on video duration
+    // Calculate pxPerSec so video fits in ~80% of viewport width
+    useEffect(() => {
+        if (hasInitializedZoom || duration <= 0 || !containerRef.current) return;
+
+        const viewportWidth = containerRef.current.clientWidth - 80; // Subtract header column and padding
+        const targetWidth = viewportWidth * 0.5; // Use 50% of available width for comfortable editing
+
+        // Calculate pxPerSec to fit the video in targetWidth
+        let adaptiveZoom = targetWidth / duration;
+
+        // Clamp to valid range (5-500)
+        adaptiveZoom = Math.max(5, Math.min(500, adaptiveZoom));
+
+        // Round to nice value
+        adaptiveZoom = Math.round(adaptiveZoom);
+
+        console.log(`[Zoom] Adaptive zoom for ${duration}s video: ${adaptiveZoom} px/sec`);
+        setPxPerSec(adaptiveZoom);
+        setHasInitializedZoom(true);
+    }, [duration, hasInitializedZoom]);
+
 
 
     // Native wheel event listener for timeline zoom (prevents browser zoom)
@@ -261,9 +287,9 @@ export default function TimelineEditor({
                 e.preventDefault(); // Block browser zoom
 
                 // Zoom in/out based on wheel direction
-                // pxPerSec range: 20-500, delta should be proportional
-                const zoomDelta = e.deltaY > 0 ? -20 : 20; // Scroll down = zoom out, up = zoom in
-                setPxPerSec(prev => Math.max(20, Math.min(500, prev + zoomDelta)));
+                // pxPerSec range: 5-500, delta should be proportional
+                const zoomDelta = e.deltaY > 0 ? -10 : 10; // Scroll down = zoom out, up = zoom in
+                setPxPerSec(prev => Math.max(5, Math.min(500, prev + zoomDelta)));
             }
             // Alt + Wheel for horizontal pan (CapCut style)
             else if (e.altKey) {
@@ -285,19 +311,24 @@ export default function TimelineEditor({
 
     // NOTE: Auto-condense removed for performance. Clips are condensed only on drop (handleMouseUp).
 
-    // Dynamic Layers Logic: Show max used layer + 1 (for creating new)
+    // Dynamic Layers Logic: Show only layers that have clips
+    // Extra layer for new track is created on DROP, not during drag
+    // (Prevents layout shift that causes clip to separate from mouse)
     const renderLayers = useMemo(() => {
         // Find max used layer
         const maxLayer = Math.max(0, ...videoClips.map(c => c.layer || 0));
-        // Array from 0 to maxLayer + 1, REVERSED so V1 (layer 0) is at bottom, above audio
-        return Array.from({ length: maxLayer + 2 }, (_, i) => i).reverse();
+
+        // Generate layers from 0 to maxLayer, REVERSED so V1 is at bottom
+        return Array.from({ length: maxLayer + 1 }, (_, i) => i).reverse();
     }, [videoClips]);
 
-    // Dynamic Audio Layers Logic: Show max used audio layer + 1
+    // Dynamic Audio Layers Logic: Show only layers that have clips
+    // Extra layer for new track is created on DROP, not during drag
     const audioRenderLayers = useMemo(() => {
         const maxAudioLayer = Math.max(0, ...localAudioClips.map(c => c.layer || 0));
-        // Array from 0 to maxAudioLayer + 1 (A1 at top, higher layers below)
-        return Array.from({ length: maxAudioLayer + 2 }, (_, i) => i);
+
+        // Array from 0 to maxAudioLayer (A1 at top, higher layers below)
+        return Array.from({ length: maxAudioLayer + 1 }, (_, i) => i);
     }, [localAudioClips]);
 
     // Lift state up when drag ends
@@ -432,7 +463,9 @@ export default function TimelineEditor({
                 const currentPx = time * pxPerSec;
                 playheadRef.current.style.left = `${currentPx}px`; // marginLeft: 40 handles the offset
 
-                // Auto-center logic
+                // Auto-center logic - DISABLED to prevent stuttering
+                // Users can manually scroll to follow the playhead if needed
+                /*
                 if (containerRef.current) {
                     const container = containerRef.current;
                     const containerWidth = container.clientWidth;
@@ -447,6 +480,7 @@ export default function TimelineEditor({
                         }
                     }
                 }
+                */
             }
             animationFrameId = requestAnimationFrame(updatePlayhead);
         };
@@ -455,8 +489,10 @@ export default function TimelineEditor({
         return () => cancelAnimationFrame(animationFrameId);
     }, [videoElement, isPlaying, pxPerSec, isScrubbing, externalCurrentTime, videoClips, localAudioClips]);
 
-    // Total timeline width
-    const totalWidth = Math.max((duration + 5) * pxPerSec, window.innerWidth);
+    // Total timeline width - ensure ruler extends across visible area and beyond
+    // Add extra 30 seconds or at least fill the viewport width
+    const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1200;
+    const totalWidth = Math.max((duration + 30) * pxPerSec, viewportWidth * 2);
 
     // Multi-clip Frame Extraction (Per Clip)
     const extractFramesForClip = useCallback(async (clip: VideoClip) => {
@@ -850,6 +886,57 @@ export default function TimelineEditor({
             const containerRect = containerRef.current.getBoundingClientRect();
             const deltaX = e.clientX - drag.startX;
             const deltaTime = deltaX / pxPerSec;
+
+            // Get clip for all operations
+            const clip = videoClips.find(c => c.id === drag.id);
+
+            // ====== LEFT TRIM (adjust start) ======
+            if (drag.type === 'left' && drag.target === 'clip') {
+                if (!clip) return;
+
+                // Calculate new start time
+                let newStart = drag.originalStart + deltaTime;
+                const minDuration = 0.1; // Minimum clip duration (100ms)
+
+                // Clamp: can't go before 0, can't go past end - minDuration
+                newStart = Math.max(0, Math.min(newStart, drag.originalEnd - minDuration));
+
+                // Calculate how much source start shifts
+                const startShift = newStart - drag.originalStart;
+                const newSourceStart = (clip.sourceStart ?? 0) + startShift;
+
+                // Update state for preview
+                setIsDragging(prev => prev ? {
+                    ...prev,
+                    currentX: deltaTime,
+                    screenX: e.clientX,
+                    screenY: e.clientY,
+                } : null);
+                return;
+            }
+
+            // ====== RIGHT TRIM (adjust end) ======
+            if (drag.type === 'right' && drag.target === 'clip') {
+                if (!clip) return;
+
+                // Calculate new end time
+                let newEnd = drag.originalEnd + deltaTime;
+                const minDuration = 0.1; // Minimum clip duration (100ms)
+
+                // Clamp: can't go before start + minDuration
+                newEnd = Math.max(drag.originalStart + minDuration, newEnd);
+
+                // Update state for preview
+                setIsDragging(prev => prev ? {
+                    ...prev,
+                    currentX: deltaTime,
+                    screenX: e.clientX,
+                    screenY: e.clientY,
+                } : null);
+                return;
+            }
+
+            // ====== MOVE (existing logic) ======
             const clipDuration = drag.originalEnd - drag.originalStart;
 
             // Calculate new time position (only clamp to left edge, allow extending past duration)
@@ -864,34 +951,30 @@ export default function TimelineEditor({
             const trackAreaY = mouseY - headerHeight;
 
             // Get original layer from clip
-            const clip = videoClips.find(c => c.id === drag.id);
             const originalLayer = drag.originalLayer !== undefined ? drag.originalLayer : (clip?.layer ?? 0);
             let stickyLayer = drag.stickyLayer !== undefined ? drag.stickyLayer : originalLayer;
 
-            // Calculate which track the mouse is currently over
-            let mouseOverLayer = originalLayer;
-            if (trackAreaY >= 0 && drag.target === 'clip') {
-                const visualIndex = Math.floor(trackAreaY / trackHeight);
-                if (visualIndex >= 0 && visualIndex < renderLayers.length) {
-                    mouseOverLayer = renderLayers[visualIndex];
+            // CAPCUT STICKY BEHAVIOR: Only change track if moved vertically from START position
+            // Use delta from drag start instead of absolute mouse position
+            const STICKY_THRESHOLD = 20; // pixels to move before switching layers
+            const dragDeltaY = e.clientY - (drag.screenStartY ?? e.clientY);
+
+            // Calculate track switch based on how far the mouse has moved from start
+            // Each track is trackHeight (70px) tall
+            const trackSwitches = Math.floor((dragDeltaY + (dragDeltaY > 0 ? STICKY_THRESHOLD : -STICKY_THRESHOLD)) / trackHeight);
+
+            if (trackSwitches !== 0) {
+                // Moving vertically - calculate new layer
+                const originalVisualIndex = renderLayers.indexOf(originalLayer);
+                if (originalVisualIndex >= 0) {
+                    // Negative trackSwitches = moving up (to higher layers in reversed array)
+                    // Positive trackSwitches = moving down (to lower layers)
+                    const newVisualIndex = Math.max(0, Math.min(renderLayers.length - 1, originalVisualIndex + trackSwitches));
+                    stickyLayer = renderLayers[newVisualIndex] ?? originalLayer;
                 }
-            }
-
-            // CAPCUT STICKY BEHAVIOR: Only change track if moved >30px into the new track area
-            const STICKY_THRESHOLD = 30; // pixels
-            const stickyVisualIndex = renderLayers.indexOf(stickyLayer);
-            const stickyTrackTop = headerHeight + stickyVisualIndex * trackHeight;
-            const stickyTrackBottom = stickyTrackTop + trackHeight;
-
-            // Check if mouse has moved far enough outside current sticky track
-            if (mouseY < stickyTrackTop - STICKY_THRESHOLD) {
-                // Moving UP - snap to track above
-                const newVisualIndex = Math.max(0, stickyVisualIndex - 1);
-                stickyLayer = renderLayers[newVisualIndex] ?? stickyLayer;
-            } else if (mouseY > stickyTrackBottom + STICKY_THRESHOLD) {
-                // Moving DOWN - snap to track below
-                const newVisualIndex = Math.min(renderLayers.length - 1, stickyVisualIndex + 1);
-                stickyLayer = renderLayers[newVisualIndex] ?? stickyLayer;
+            } else {
+                // Within threshold - stay at original layer
+                stickyLayer = originalLayer;
             }
 
             // Calculate visualOffsetY for smooth clip movement
@@ -931,6 +1014,102 @@ export default function TimelineEditor({
 
             const deltaX = e.clientX - drag.startX;
             const deltaTime = deltaX / pxPerSec;
+
+            // Get clip for all operations
+            const clip = videoClips.find(c => c.id === drag.id);
+
+            // ====== LEFT TRIM (adjust start) ======
+            if (drag.type === 'left' && drag.target === 'clip') {
+                if (!clip) {
+                    setDropIndicator(null);
+                    setIsDragging(null);
+                    return;
+                }
+
+                // Calculate new start time
+                let newStart = drag.originalStart + deltaTime;
+                const minDuration = 0.1;
+
+                // Clamp
+                newStart = Math.max(0, Math.min(newStart, drag.originalEnd - minDuration));
+
+                // Calculate source shift
+                const startShift = newStart - drag.originalStart;
+                const newSourceStart = Math.max(0, (clip.sourceStart ?? 0) + startShift);
+
+                // Update video clip
+                const updatedClips = videoClips.map(c =>
+                    c.id === drag.id
+                        ? { ...c, startTime: newStart, sourceStart: newSourceStart }
+                        : c
+                );
+                setVideoClips(updatedClips);
+                onUpdateVideoClips(updatedClips);
+
+                // Sync linked audio if exists (find by videoClipId)
+                const linkedAudio = localAudioClips.find(a => a.videoClipId === clip.id);
+                if (linkedAudio) {
+                    const updatedAudioClips = localAudioClips.map(a =>
+                        a.videoClipId === clip.id
+                            ? { ...a, startTime: newStart, sourceStart: newSourceStart }
+                            : a
+                    );
+                    setLocalAudioClips(updatedAudioClips);
+                    onUpdateAudioClips(updatedAudioClips);
+                }
+
+                setDropIndicator(null);
+                setIsDragging(null);
+                return;
+            }
+
+            // ====== RIGHT TRIM (adjust end) ======
+            if (drag.type === 'right' && drag.target === 'clip') {
+                if (!clip) {
+                    setDropIndicator(null);
+                    setIsDragging(null);
+                    return;
+                }
+
+                // Calculate new end time
+                let newEnd = drag.originalEnd + deltaTime;
+                const minDuration = 0.1;
+
+                // Clamp: can't go before start + minDuration
+                newEnd = Math.max(drag.originalStart + minDuration, newEnd);
+
+                // Calculate new source end
+                const endShift = newEnd - drag.originalEnd;
+                const currentSourceEnd = clip.sourceEnd ?? (clip.endTime - clip.startTime);
+                const newSourceEnd = Math.max(clip.sourceStart ?? 0, currentSourceEnd + endShift);
+
+                // Update video clip
+                const updatedClips = videoClips.map(c =>
+                    c.id === drag.id
+                        ? { ...c, endTime: newEnd, sourceEnd: newSourceEnd }
+                        : c
+                );
+                setVideoClips(updatedClips);
+                onUpdateVideoClips(updatedClips);
+
+                // Sync linked audio if exists (find by videoClipId)
+                const linkedAudio = localAudioClips.find(a => a.videoClipId === clip.id);
+                if (linkedAudio) {
+                    const updatedAudioClips = localAudioClips.map(a =>
+                        a.videoClipId === clip.id
+                            ? { ...a, endTime: newEnd, sourceEnd: newSourceEnd }
+                            : a
+                    );
+                    setLocalAudioClips(updatedAudioClips);
+                    onUpdateAudioClips(updatedAudioClips);
+                }
+
+                setDropIndicator(null);
+                setIsDragging(null);
+                return;
+            }
+
+            // ====== MOVE (existing logic) ======
             const clipDuration = drag.originalEnd - drag.originalStart;
 
             // Calculate final position (only clamp to left edge, allow extending past duration)
@@ -940,19 +1119,53 @@ export default function TimelineEditor({
             const newEnd = newStart + clipDuration;
 
             // Calculate final target layer
-            const clip = videoClips.find(c => c.id === drag.id);
             let targetLayer = clip?.layer || 0;
+            const originalLayer = drag.originalLayer ?? (clip?.layer || 0);
+
             if (containerRef.current && drag.target === 'clip') {
                 const containerRect = containerRef.current.getBoundingClientRect();
                 const mouseY = e.clientY - containerRect.top + containerRef.current.scrollTop;
-                const headerHeight = 24 + 64 + 6;
+                const headerHeight = 24 + 64 + 6; // Ruler + CC row + spacer
                 const trackHeight = 70;
                 const trackAreaY = mouseY - headerHeight;
 
-                if (trackAreaY >= 0) {
+                // Find max layer in current clips
+                const maxLayer = Math.max(0, ...videoClips.map(c => c.layer || 0));
+
+                // Calculate which track the mouse is over
+                // renderLayers is REVERSED: [maxLayer, maxLayer-1, ..., 1, 0]
+                // So visualIndex 0 = maxLayer (top), last index = 0 (V1, bottom)
+
+                if (trackAreaY < 0) {
+                    // Mouse is ABOVE all tracks (in header/CC area)
+                    // Only create new layer if user actually dragged upward
+                    const draggedUpward = drag.screenStartY !== undefined &&
+                        (drag.screenStartY - e.clientY) > 20;
+                    if (draggedUpward) {
+                        targetLayer = maxLayer + 1;
+                    }
+                    // If just clicked (no significant movement), keep original layer
+                } else {
                     const visualIndex = Math.floor(trackAreaY / trackHeight);
-                    if (visualIndex >= 0 && visualIndex < renderLayers.length) {
+
+                    if (visualIndex < renderLayers.length) {
+                        // Mouse is over an existing track
                         targetLayer = renderLayers[visualIndex];
+
+                        // Check if this is the top track and mouse is in the upper half
+                        // Only create new layer if user actually dragged upward significantly
+                        if (visualIndex === 0) {
+                            const positionInTrack = trackAreaY % trackHeight;
+                            const draggedUpward = drag.screenStartY !== undefined &&
+                                (drag.screenStartY - e.clientY) > 20;
+                            if (positionInTrack < trackHeight / 2 && draggedUpward) {
+                                // Upper half of top track AND actually dragged - create new layer
+                                targetLayer = maxLayer + 1;
+                            }
+                        }
+                    } else {
+                        // Mouse is below all visible tracks - stay at V1
+                        targetLayer = 0;
                     }
                 }
             }
@@ -1164,7 +1377,7 @@ export default function TimelineEditor({
 
             if (containerRef.current) {
                 const rect = containerRef.current.getBoundingClientRect();
-                const x = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header offset
+                const x = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header column offset
                 const time = Math.max(0, Math.min(x / pxPerSec, duration));
                 if (playheadRef.current) playheadRef.current.style.left = `${time * pxPerSec}px`;
                 onSeek(time);
@@ -1179,7 +1392,7 @@ export default function TimelineEditor({
             // 1. Move Playhead
             if (containerRef.current) {
                 const rect = containerRef.current.getBoundingClientRect();
-                const clickX = e.clientX - rect.left + containerRef.current.scrollLeft;
+                const clickX = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header column offset
                 const time = Math.max(0, Math.min(clickX / pxPerSec, duration));
                 onSeek(time);
             }
@@ -1228,7 +1441,7 @@ export default function TimelineEditor({
         scrubMouseX.current = e.clientX;
         if (containerRef.current) {
             const rect = containerRef.current.getBoundingClientRect();
-            const clickX = e.clientX - rect.left + containerRef.current.scrollLeft;
+            const clickX = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header column offset
             const time = Math.max(0, Math.min(clickX / pxPerSec, duration));
             if (playheadRef.current) playheadRef.current.style.left = `${time * pxPerSec}px`;
             onSeek(time);
@@ -1749,12 +1962,54 @@ export default function TimelineEditor({
                             style={{ width: totalWidth }}
                             onMouseDown={handleScrubStart}
                         >
-                            {Array.from({ length: Math.ceil(duration) + 1 }).map((_, i) => (
-                                <div key={i} className="absolute top-0 h-full flex flex-col items-start" style={{ left: i * pxPerSec }}>
-                                    <div className={`w-px ${i % 5 === 0 ? 'h-3 bg-gray-400' : 'h-2 bg-gray-300'}`} />
-                                    {i % 5 === 0 && <span className="text-[10px] text-gray-500 ml-0.5">{formatTime(i)}</span>}
-                                </div>
-                            ))}
+                            {(() => {
+                                // Adaptive ruler ticks based on zoom level (CapCut/Premiere style)
+                                // Calculate appropriate tick interval based on pxPerSec
+                                // Aim for ticks to be at least 40px apart, labels at least 80px apart
+
+                                const minTickSpacing = 40; // Minimum pixels between ticks
+                                const minLabelSpacing = 80; // Minimum pixels between labels
+
+                                // Available intervals in seconds (sorted from small to large)
+                                const intervals = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+
+                                // Find smallest interval that gives at least minTickSpacing pixels
+                                let tickInterval = 1;
+                                for (const interval of intervals) {
+                                    if (interval * pxPerSec >= minTickSpacing) {
+                                        tickInterval = interval;
+                                        break;
+                                    }
+                                }
+                                if (tickInterval === 1 && pxPerSec < minTickSpacing) {
+                                    // Even 1s is too small, find appropriate larger interval
+                                    tickInterval = Math.ceil(minTickSpacing / pxPerSec);
+                                }
+
+                                // Calculate label interval (show label every N ticks)
+                                let labelMultiplier = 1;
+                                while (tickInterval * labelMultiplier * pxPerSec < minLabelSpacing) {
+                                    labelMultiplier++;
+                                }
+                                const labelInterval = tickInterval * labelMultiplier;
+
+                                // Generate ticks
+                                const ticks = [];
+                                for (let time = 0; time <= duration + tickInterval; time += tickInterval) {
+                                    const isLabelTick = time % labelInterval === 0;
+                                    ticks.push(
+                                        <div
+                                            key={time}
+                                            className="absolute top-0 h-full flex flex-col items-start"
+                                            style={{ left: time * pxPerSec }}
+                                        >
+                                            <div className={`w-px ${isLabelTick ? 'h-3 bg-gray-400' : 'h-2 bg-gray-300'}`} />
+                                            {isLabelTick && <span className="text-[10px] text-gray-500 ml-0.5">{formatTime(time)}</span>}
+                                        </div>
+                                    );
+                                }
+                                return ticks;
+                            })()}
                         </div>
                     </div>
 
@@ -1865,6 +2120,8 @@ export default function TimelineEditor({
                                                                 )}
                                                                 dragOffsetX={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentX || 0) * pxPerSec : 0}
                                                                 dragOffsetY={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentY || 0) : 0}
+                                                                trimLeftOffset={isDragging?.id === clip.id && isDragging?.type === 'left' ? (isDragging?.currentX || 0) * pxPerSec : 0}
+                                                                trimRightOffset={isDragging?.id === clip.id && isDragging?.type === 'right' ? (isDragging?.currentX || 0) * pxPerSec : 0}
                                                                 audioWaveformL={audioWaveformL}
                                                                 onVolumeChange={handleVolumeChange}
                                                             />
@@ -1968,7 +2225,16 @@ export default function TimelineEditor({
                     })}
 
                     {/* Playhead - offset by 40px for sticky header */}
-                    <div ref={playheadRef} className="absolute top-0 bottom-0 z-50 group cursor-ew-resize" style={{ marginLeft: 40 }} onMouseDown={handleScrubStart}>
+                    <div
+                        ref={playheadRef}
+                        className="absolute top-0 bottom-0 z-50 group cursor-ew-resize"
+                        style={{
+                            marginLeft: 40,
+                            // Smooth transition during playback, instant during scrubbing
+                            transition: isPlaying && !isScrubbing ? 'left 50ms linear' : 'none'
+                        }}
+                        onMouseDown={handleScrubStart}
+                    >
                         {/* Hit area */}
                         <div className="absolute inset-y-0 -left-2 -right-2 bg-transparent" />
 
