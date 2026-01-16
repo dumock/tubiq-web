@@ -1,0 +1,27 @@
+2026/01/14-03:38:46.091 82b0 Reusing MANIFEST C:\tubiq-web\chrome-profiles\grok-manual\Default\Local Storage\leveldb/MANIFEST-000001
+2026/01/14-03:38:46.112 82b0 Recovering log #1002
+2026/01/14-03:38:46.115 82b0 Reusing old log C:\tubiq-web\chrome-profiles\grok-manual\Default\Local Storage\leveldb/001002.log 
+2026/01/14-03:39:46.129 56ac Level-0 table #1006: started
+2026/01/14-03:39:46.133 56ac Level-0 table #1006: 56273 bytes OK
+2026/01/14-03:39:46.134 56ac Delete type=0 #1002
+2026/01/14-03:40:47.188 56ac Level-0 table #1008: started
+2026/01/14-03:40:47.192 56ac Level-0 table #1008: 55135 bytes OK
+2026/01/14-03:40:47.193 56ac Delete type=0 #1005
+2026/01/14-03:40:47.194 56ac Compacting 4@0 + 1@1 files
+2026/01/14-03:40:47.206 56ac Generated table #1009@0: 16938 keys, 279926 bytes
+2026/01/14-03:40:47.206 56ac Compacted 4@0 + 1@1 files => 279926 bytes
+2026/01/14-03:40:47.206 56ac compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/01/14-03:40:47.207 56ac Delete type=2 #999
+2026/01/14-03:40:47.207 56ac Delete type=2 #1001
+2026/01/14-03:40:47.207 56ac Delete type=2 #1003
+2026/01/14-03:40:47.207 56ac Delete type=2 #1006
+2026/01/14-03:40:47.207 56ac Delete type=2 #1008
+2026/01/14-03:41:47.186 56ac Level-0 table #1011: started
+2026/01/14-03:41:47.191 56ac Level-0 table #1011: 54828 bytes OK
+2026/01/14-03:41:47.192 56ac Delete type=0 #1007
+2026/01/14-03:42:47.191 56ac Level-0 table #1013: started
+2026/01/14-03:42:47.197 56ac Level-0 table #1013: 54469 bytes OK
+2026/01/14-03:42:47.198 56ac Delete type=0 #1010
+2026/01/14-03:43:30.807 56ac Level-0 table #1015: started
+2026/01/14-03:43:30.820 56ac Level-0 table #1015: 54272 bytes OK
+2026/01/14-03:43:30.824 56ac Delete type=0 #1012

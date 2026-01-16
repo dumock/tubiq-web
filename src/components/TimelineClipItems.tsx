@@ -114,12 +114,14 @@ export const VideoClipItem = memo(({
     return (
         <div
             className={`video-clip absolute inset-y-0 rounded-lg overflow-hidden cursor-pointer group select-none ${isDragging
-                    ? 'opacity-0 pointer-events-none' // Completely hide when dragging - only Portal overlay visible
-                    : 'transition-[left,width] duration-200 ease-out z-0 border-2'
+                ? 'opacity-0 pointer-events-none' // Hidden during drag - rendered at global level to avoid track clipping
+                : 'z-0 border-2' // No transition - instant position update to prevent drop bounce
                 } ${isSelected && !isDragging ? 'border-yellow-400 ring-2 ring-yellow-400 z-10' : !isDragging ? 'border-indigo-500 hover:border-indigo-400' : ''}`}
             style={{
                 left: clip.startTime * pxPerSec,
                 width: Math.max(clipWidth, 20),
+                // Apply transform for smooth drag following (both horizontal and vertical)
+                transform: isDragging ? `translate(${dragOffsetX}px, ${dragOffsetY}px)` : undefined,
             }}
             onMouseDown={(e) => {
                 // Block all interactions if clip is locked
@@ -142,8 +144,8 @@ export const VideoClipItem = memo(({
             }}
             onContextMenu={(e) => onContextMenu(e, clip)}
         >
-            {/* Only show contents when not dragging - dragging shows dashed placeholder only */}
-            {!isDragging && (
+            {/* Always show contents - isDragging just makes clip semi-transparent */}
+            {(
                 <>
                     {/* Video frames section - top portion */}
                     <div className="absolute top-0 left-0 right-0 flex overflow-hidden pointer-events-none" style={{ height: videoHeight }}>

@@ -110,16 +110,24 @@ export const DragOverlay = memo(({
             <div className="relative w-full h-full rounded-lg overflow-hidden border-2 border-yellow-400 shadow-2xl bg-zinc-800">
                 {/* Video frame thumbnails - top 44px */}
                 <div className="absolute inset-0 flex" style={{ height: 44 }}>
-                    {frameSlots.length > 0 ? (
+                    {frameSlots.length > 0 && frameSlots.some(src => src) ? (
                         frameSlots.map((src, i) => (
-                            <img
-                                key={i}
-                                src={src}
-                                alt=""
-                                className="h-full flex-shrink-0 object-cover"
-                                style={{ width: slotWidth }}
-                                draggable={false}
-                            />
+                            src ? (
+                                <img
+                                    key={i}
+                                    src={src}
+                                    alt=""
+                                    className="h-full flex-shrink-0 object-cover"
+                                    style={{ width: slotWidth }}
+                                    draggable={false}
+                                />
+                            ) : (
+                                <div
+                                    key={i}
+                                    className="h-full flex-shrink-0 bg-zinc-700"
+                                    style={{ width: slotWidth }}
+                                />
+                            )
                         ))
                     ) : (
                         <div className="w-full h-full bg-gradient-to-r from-zinc-700 to-zinc-600" />

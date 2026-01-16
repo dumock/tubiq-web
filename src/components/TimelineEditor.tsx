@@ -176,14 +176,23 @@ export default function TimelineEditor({
     // Timeline State
     const [pxPerSec, setPxPerSec] = useState(100);
     const containerRef = useRef<HTMLDivElement>(null);
-    const [isDragging, setIsDragging] = useState<{ id: string, type: 'left' | 'right' | 'move', target: 'clip' | 'subtitle' | 'audio', startX: number, originalStart: number, originalEnd: number, currentX?: number, currentY?: number, mouseX?: number, mouseY?: number, screenStartX?: number, screenStartY?: number, screenX?: number, screenY?: number, grabOffsetX?: number } | null>(null);
+    const [isDragging, setIsDragging] = useState<{ id: string, type: 'left' | 'right' | 'move', target: 'clip' | 'subtitle' | 'audio', startX: number, originalStart: number, originalEnd: number, currentX?: number, currentY?: number, mouseX?: number, mouseY?: number, screenStartX?: number, screenStartY?: number, screenX?: number, screenY?: number, grabOffsetX?: number, grabOffsetY?: number, stickyLayer?: number, visualOffsetY?: number, originalLayer?: number } | null>(null);
+    const isDraggingRef = useRef(isDragging); // Ref to avoid stale closure in event handlers
+    isDraggingRef.current = isDragging; // Keep ref in sync with state
     const [dropIndicator, setDropIndicator] = useState<{ time: number, layer: number, gapIndex?: number, gapSize?: number } | null>(null);
     const [audioDropIndicator, setAudioDropIndicator] = useState<{ layer: number, gapIndex: number, gapSize: number } | null>(null);
+
+    // Direct DOM Refs for Drag Optimization
+    const dragProxyRef = useRef<HTMLDivElement>(null);
+    const dropIndicatorRef = useRef<HTMLDivElement>(null); // For free mode red line optimization
 
     // CapCut-style Timeline Mode Toggles
     const [magnetMode, setMagnetMode] = useState(true); // 메인트랙 마그넷: clips auto-condense (no gaps)
     const [snapMode, setSnapMode] = useState(true); // 자동스냅: clips snap to edges/playhead
     const [linkMode, setLinkMode] = useState(true); // 연결: audio-video clips move together
+
+    // Snap Indicator State - shows yellow line when snapping
+    const [snapIndicator, setSnapIndicator] = useState<{ type: 'playhead' | 'clip-start' | 'clip-end', time: number } | null>(null);
 
     // Global Drag Overlay State - stores visual data for the dragged clip
     const [dragOverlayData, setDragOverlayData] = useState<DragOverlayData | null>(null);
@@ -421,7 +430,7 @@ export default function TimelineEditor({
 
             if (playheadRef.current && (isPlaying || externalCurrentTime !== undefined) && !isScrubbing) {
                 const currentPx = time * pxPerSec;
-                playheadRef.current.style.left = `${currentPx}px`;
+                playheadRef.current.style.left = `${currentPx}px`; // marginLeft: 40 handles the offset
 
                 // Auto-center logic
                 if (containerRef.current) {
@@ -830,594 +839,160 @@ export default function TimelineEditor({
         return { prevClip, nextClip };
     };
 
-    // Main Drag Logic
+    // ============================================================
+    // CLEAN DRAG LOGIC - Uses ref to avoid stale closure
+    // ============================================================
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => {
-            if (!isDragging) return;
+            const drag = isDraggingRef.current;
+            if (!drag || !containerRef.current) return;
 
-            const deltaX = e.clientX - isDragging.startX;
+            const containerRect = containerRef.current.getBoundingClientRect();
+            const deltaX = e.clientX - drag.startX;
             const deltaTime = deltaX / pxPerSec;
+            const clipDuration = drag.originalEnd - drag.originalStart;
 
-            let newStart = isDragging.originalStart;
-            let newEnd = isDragging.originalEnd;
-            const blockDuration = isDragging.originalEnd - isDragging.originalStart;
+            // Calculate new time position (only clamp to left edge, allow extending past duration)
+            let newStart = drag.originalStart + deltaTime;
+            if (newStart < 0) newStart = 0;
+            // Note: We don't clamp to duration in free-mode - clips can extend timeline
 
-            if (isDragging.target === 'subtitle') {
-                const rawNewStart = Math.max(0, isDragging.originalStart + deltaTime);
-                const rawNewEnd = rawNewStart + blockDuration;
+            // Calculate target layer from mouse Y position with STICKY THRESHOLD (CapCut style)
+            const mouseY = e.clientY - containerRect.top + containerRef.current.scrollTop;
+            const headerHeight = 24 + 64 + 6; // Ruler + CC row + spacer
+            const trackHeight = 70;
+            const trackAreaY = mouseY - headerHeight;
 
-                // Get other subtitles sorted by position
-                const otherSubtitles = subtitles
-                    .filter((s: Subtitle) => s.id !== isDragging.id)
-                    .sort((a: Subtitle, b: Subtitle) => a.startTime - b.startTime);
+            // Get original layer from clip
+            const clip = videoClips.find(c => c.id === drag.id);
+            const originalLayer = drag.originalLayer !== undefined ? drag.originalLayer : (clip?.layer ?? 0);
+            let stickyLayer = drag.stickyLayer !== undefined ? drag.stickyLayer : originalLayer;
 
-                if (isDragging.type === 'move') {
-                    // Front-Edge 70% Rule for subtitles
-                    let pOverlapIndex = -1;
-
-                    otherSubtitles.forEach((s: Subtitle, idx: number) => {
-                        const targetDuration = s.endTime - s.startTime;
-                        const threshold30Percent = s.startTime + (targetDuration * 0.3);
-
-                        // If dragged subtitle's FRONT is past the 30% mark (70% rule)
-                        if (rawNewStart < threshold30Percent && rawNewStart >= s.startTime) {
-                            pOverlapIndex = idx;
-                        }
-                    });
-
-                    if (pOverlapIndex !== -1) {
-                        // Reorder detected - sort and condense
-                        const targetSub = otherSubtitles[pOverlapIndex];
-
-                        // Create temp array with new position for sorting
-                        const tempSubs = subtitles.map(s => {
-                            if (s.id === isDragging.id) {
-                                return { ...s, startTime: targetSub.startTime - 0.001, endTime: targetSub.startTime - 0.001 + blockDuration };
-                            }
-                            return s;
-                        });
-
-                        // Sort and condense
-                        const sortedSubs = tempSubs.sort((a, b) => a.startTime - b.startTime);
-                        let cursor = 0;
-
-                        sortedSubs.forEach(s => {
-                            const dur = s.endTime - s.startTime;
-                            // Update each subtitle with condensed position
-                            // (For the dragged one, use raw position for visual float)
-                            if (s.id === isDragging.id) {
-                                onUpdateSubtitle(s.id, rawNewStart, rawNewEnd);
-                            } else {
-                                onUpdateSubtitle(s.id, cursor, cursor + dur);
-                            }
-                            cursor += dur;
-                        });
-                    } else {
-                        // No reorder - just follow mouse
-                        onUpdateSubtitle(isDragging.id, rawNewStart, rawNewEnd);
-                    }
-                } else if (isDragging.type === 'left') {
-                    // Resize left edge
-                    newStart += deltaTime;
-                    const { prevSub } = getAdjacentSubtitles(isDragging.id);
-                    if (prevSub && newStart < prevSub.endTime) newStart = prevSub.endTime;
-                    if (newStart < 0) newStart = 0;
-                    if (newEnd - newStart < 0.1) newStart = newEnd - 0.1;
-                    onUpdateSubtitle(isDragging.id, newStart, newEnd);
-                } else if (isDragging.type === 'right') {
-                    // Resize right edge
-                    newEnd += deltaTime;
-                    const { nextSub } = getAdjacentSubtitles(isDragging.id);
-                    if (nextSub && newEnd > nextSub.startTime) newEnd = nextSub.startTime;
-                    if (newEnd > duration) newEnd = duration;
-                    if (newEnd - newStart < 0.1) newEnd = newStart + 0.1;
-                    onUpdateSubtitle(isDragging.id, newStart, newEnd);
+            // Calculate which track the mouse is currently over
+            let mouseOverLayer = originalLayer;
+            if (trackAreaY >= 0 && drag.target === 'clip') {
+                const visualIndex = Math.floor(trackAreaY / trackHeight);
+                if (visualIndex >= 0 && visualIndex < renderLayers.length) {
+                    mouseOverLayer = renderLayers[visualIndex];
                 }
-
-            } else if (isDragging.target === 'clip') {
-                const clip = videoClips.find(c => c.id === isDragging.id);
-                if (!clip) return;
-
-                let targetLayer = clip.layer || 0;
-
-                // Layer Logic: Calculate target layer from Y position
-                if (isDragging.type === 'move') {
-                    const containerRect = containerRef.current?.getBoundingClientRect();
-                    if (containerRect) {
-                        const relativeY = e.clientY - containerRect.top;
-                        const headerHeight = 80;
-                        const trackHeight = 56;
-                        const trackAreaY = relativeY - headerHeight;
-
-                        if (trackAreaY >= 0) {
-                            const visualIndex = Math.floor(trackAreaY / trackHeight);
-                            if (visualIndex >= 0 && visualIndex < renderLayers.length) {
-                                targetLayer = renderLayers[visualIndex];
-                            } else if (visualIndex >= renderLayers.length) {
-                                targetLayer = 0;
-                            }
-                        }
-                    }
-
-
-                    const otherClipsInLayer = videoClips.filter(c => c.id !== isDragging.id && (c.layer || 0) === targetLayer)
-                        .sort((a, b) => a.startTime - b.startTime);
-
-                    // Check if magnetMode is ON AND target is V1 (layer 0)
-                    // Magnetic mode ONLY applies to main track (V1)
-                    if (magnetMode && targetLayer === 0) {
-                        // -------------------------------------------------------------------------
-                        // MAGNETIC REORDER (TikTok/CapCut Style) - magnetMode ON + V1 main track
-                        // -------------------------------------------------------------------------
-                        // 1. Calculate Unconstrained Position (Visual Ghost)
-                        // This is just for the proxy rendering
-                        const rawNewStart = Math.max(0, isDragging.originalStart + deltaTime);
-
-                        // 2. Identify Drop Target (Gap Index)
-                        const draggedClipDuration = isDragging.originalEnd - isDragging.originalStart;
-
-                        // Get clips in the target layer (excluding dragged clip itself)
-                        // We need their indices relative to the layer *before* drag?
-                        // No, we treat the remaining clips as a sequence and insert into them.
-                        const targetClips = videoClips
-                            .filter(c => c.id !== isDragging.id && (c.layer || 0) === targetLayer)
-                            .sort((a, b) => a.startTime - b.startTime);
-
-                        // Default insert at end
-                        let gapIndex = targetClips.length;
-
-                        // Iterate to find insertion point
-                        for (let i = 0; i < targetClips.length; i++) {
-                            const target = targetClips[i];
-                            const targetWidth = target.endTime - target.startTime;
-                            // 70% Threshold Logic
-                            // Mouse X (in time units) relative to target start
-                            const mouseTime = rawNewStart; // Mouse "head" time? Or Mouse cursor time?
-                            // "rawNewStart" is roughly the start time of the ghost clip.
-                            // User wants: "Pass 70% of target".
-                            // Target 70% point: start + width * 0.7
-                            const threshold = target.startTime + (targetWidth * 0.7);
-
-                            // Check if we haven't passed this clip's threshold yet
-                            if (rawNewStart < threshold) {
-                                gapIndex = i;
-                                break;
-                            }
-                            // If we passed it, we check the next one.
-                        }
-
-                        // 3. Update UI State (No Array Mutation Here!)
-                        // Store gapIndex and gapSize (dragged clip duration)
-                        setDropIndicator({ time: 0, layer: targetLayer, gapIndex, gapSize: draggedClipDuration });
-
-                        // Update isDragging with current Delta to drive Ghost Rendering
-                        setIsDragging(prev => prev ? { ...prev, currentX: deltaTime, currentY: e.clientY - (prev.screenStartY || e.clientY), mouseX: e.clientX, mouseY: e.clientY, screenX: e.clientX, screenY: e.clientY } : null);
-
-                        // Update drag overlay screen position for the Portal
-                        setDragOverlayData(prev => prev ? { ...prev, screenX: e.clientX, screenY: e.clientY } : null);
-
-                        return; // Early return, do not condense or setVideoClips
-                    } else {
-                        // -------------------------------------------------------------------------
-                        // FREE POSITIONING MODE - magnetMode OFF or non-V1 layer
-                        // -------------------------------------------------------------------------
-                        // DON'T update clip position during drag - only update the overlay position
-                        // The actual clip position will be updated on mouseup
-
-                        // Calculate where the clip will land based on relative delta (same as MAGNETIC MODE)
-                        // Using originalStart + deltaTime ensures consistent calculation
-                        let newStart = isDragging.originalStart + deltaTime;
-                        if (newStart < 0) newStart = 0;
-                        const clipDuration = isDragging.originalEnd - isDragging.originalStart;
-                        if (newStart + clipDuration > duration) {
-                            newStart = duration - clipDuration;
-                        }
-
-                        // Set dropIndicator to show drop target preview at the destination
-                        setDropIndicator({
-                            time: newStart,
-                            layer: targetLayer,
-                            gapIndex: -1, // Special value for free mode - use 'time' instead
-                            gapSize: clipDuration
-                        });
-
-                        // Update drag overlay screen position for the Portal (visual feedback only)
-                        setDragOverlayData(prev => prev ? { ...prev, screenX: e.clientX, screenY: e.clientY } : null);
-                        setIsDragging(prev => prev ? { ...prev, currentX: deltaTime, currentY: e.clientY - (prev.screenStartY || e.clientY), mouseX: e.clientX, mouseY: e.clientY, screenX: e.clientX, screenY: e.clientY } : null);
-
-                        return;
-                    }
-                }
-
-
-
-
-                // Deleted old magnetic logic
-
-
-                // Resize Logic
-                if (isDragging.type !== 'move') {
-                    const currentDrag = isDragging!; // Assert non-null
-                    const targetClip = videoClips.find(c => c.id === currentDrag.id);
-
-                    if (targetClip) {
-                        let newStart = currentDrag.originalStart;
-                        let newEnd = currentDrag.originalEnd;
-                        let targetLayer = targetClip.layer || 0;
-
-                        if (isDragging.type === 'left') {
-                            newStart = isDragging.originalStart + deltaTime;
-
-                            // Adjacent Clip Logic
-                            const { prevClip } = getAdjacentClips(isDragging.id, targetLayer);
-                            if (prevClip && newStart < prevClip.endTime) newStart = prevClip.endTime;
-
-                            if (newStart < 0) newStart = 0;
-                            if (newStart >= targetClip.endTime - 0.1) newStart = targetClip.endTime - 0.1;
-
-                        } else if (isDragging.type === 'right') {
-                            newEnd = isDragging.originalEnd + deltaTime;
-
-                            // Adjacent Clip Logic
-                            const { nextClip } = getAdjacentClips(isDragging.id, targetLayer);
-                            if (nextClip && newEnd > nextClip.startTime) newEnd = nextClip.startTime;
-
-                            if (newEnd > duration) newEnd = duration;
-                            if (newEnd <= targetClip.startTime + 0.1) newEnd = targetClip.startTime + 0.1;
-                        }
-
-                        const updatedClips = videoClips.map((c: VideoClip) =>
-                            c.id === currentDrag.id
-                                ? { ...c, startTime: newStart, endTime: newEnd, layer: targetLayer }
-                                : c
-                        );
-                        setVideoClips(updatedClips);
-                    }
-                }
-
-            } else if (isDragging.target === 'audio') {
-                const audioClip = localAudioClips.find(a => a.id === isDragging.id);
-                if (!audioClip) return;
-
-                // Calculate target audio layer based on mouse Y position
-                let targetAudioLayer = audioClip.layer || 0;
-                if (containerRef.current && isDragging.type === 'move') {
-                    const rect = containerRef.current.getBoundingClientRect();
-                    const mouseY = e.clientY - rect.top + containerRef.current.scrollTop;
-
-                    // Calculate Y offset where audio tracks start
-                    // Layout: Ruler(24) + CC(64) + Spacer(10) + Videos(each 64+10) + Audio tracks start
-                    const rulerHeight = 24;
-                    const ccTrackHeight = 64 + 10; // CC + spacer
-                    const videoTrackHeight = 64 + 10; // Each video track + spacer
-                    const audioTrackHeight = 36 + 10; // Each audio track + spacer
-
-                    const videoTracksCount = renderLayers.length;
-                    const audioTracksStartY = rulerHeight + ccTrackHeight + (videoTracksCount * videoTrackHeight);
-
-                    // Calculate which audio layer the mouse is over
-                    if (mouseY >= audioTracksStartY) {
-                        const audioRelativeY = mouseY - audioTracksStartY;
-                        const visualAudioIndex = Math.floor(audioRelativeY / audioTrackHeight);
-                        // Clamp to valid range
-                        targetAudioLayer = Math.max(0, Math.min(visualAudioIndex, audioRenderLayers.length - 1));
-                    }
-                }
-
-                // Get adjacent clips IN THE TARGET LAYER (not original layer)
-                const clipsInTargetLayer = localAudioClips
-                    .filter(c => c.id !== isDragging.id && (c.layer || 0) === targetAudioLayer)
-                    .sort((a, b) => a.startTime - b.startTime);
-
-                const clipIndex = clipsInTargetLayer.findIndex(c => c.startTime > audioClip.startTime);
-                const prevClip = clipIndex > 0 ? clipsInTargetLayer[clipIndex - 1] : (clipIndex === -1 && clipsInTargetLayer.length > 0 ? clipsInTargetLayer[clipsInTargetLayer.length - 1] : null);
-                const nextClip = clipIndex >= 0 ? clipsInTargetLayer[clipIndex] : null;
-
-                if (isDragging.type === 'move') {
-                    if (magnetMode) {
-                        // -------------------------------------------------------------------------
-                        // MAGNETIC REORDER FOR AUDIO (Same as Video) - magnetMode ON
-                        // -------------------------------------------------------------------------
-                        const rawNewStart = Math.max(0, isDragging.originalStart + deltaTime);
-                        const draggedClipDuration = isDragging.originalEnd - isDragging.originalStart;
-
-                        // Get clips in target layer (excluding dragged)
-                        const targetClips = localAudioClips
-                            .filter(c => c.id !== isDragging.id && (c.layer || 0) === targetAudioLayer)
-                            .sort((a, b) => a.startTime - b.startTime);
-
-                        // Find insertion gap index based on mouse position
-                        let gapIndex = targetClips.length; // Default: insert at end
-                        for (let i = 0; i < targetClips.length; i++) {
-                            const clipMidpoint = (targetClips[i].startTime + targetClips[i].endTime) / 2;
-                            if (rawNewStart < clipMidpoint) {
-                                gapIndex = i;
-                                break;
-                            }
-                        }
-
-                        // Update audio drop indicator for visual feedback
-                        setAudioDropIndicator({ layer: targetAudioLayer, gapIndex, gapSize: draggedClipDuration });
-
-                        // Update isDragging for ghost rendering
-                        setIsDragging(prev => prev ? { ...prev, currentX: deltaTime, currentY: e.clientY - (prev.screenStartY || e.clientY), mouseX: e.clientX, mouseY: e.clientY, screenX: e.clientX, screenY: e.clientY } : null);
-
-                        return; // Early return - don't apply position changes yet
-                    } else {
-                        // -------------------------------------------------------------------------
-                        // FREE POSITIONING MODE - magnetMode OFF
-                        // -------------------------------------------------------------------------
-                        let newStart = isDragging.originalStart + deltaTime;
-                        let newEnd = isDragging.originalEnd + deltaTime;
-
-                        // Clamp to timeline bounds
-                        if (newStart < 0) {
-                            newEnd -= newStart;
-                            newStart = 0;
-                        }
-                        if (newEnd > duration) {
-                            newStart -= (newEnd - duration);
-                            newEnd = duration;
-                        }
-
-                        // Snap to other clips' edges if snapMode is ON
-                        if (snapMode) {
-                            const snapThreshold = 5 / pxPerSec;
-                            for (const other of clipsInTargetLayer) {
-                                if (Math.abs(newStart - other.endTime) < snapThreshold) {
-                                    const shift = other.endTime - newStart;
-                                    newStart = other.endTime;
-                                    newEnd += shift;
-                                }
-                                if (Math.abs(newEnd - other.startTime) < snapThreshold) {
-                                    const shift = other.startTime - newEnd;
-                                    newEnd = other.startTime;
-                                    newStart += shift;
-                                }
-                            }
-                        }
-
-                        // Update clip position directly
-                        const updatedAudioClips = localAudioClips.map(a =>
-                            a.id === isDragging.id
-                                ? { ...a, startTime: newStart, endTime: newEnd, layer: targetAudioLayer }
-                                : a
-                        );
-                        setLocalAudioClips(updatedAudioClips);
-                        return;
-                    }
-                } else if (isDragging.type === 'left') {
-                    newStart += deltaTime;
-                    const { prevClip: origPrev } = getAdjacentAudioClips(isDragging.id);
-                    if (origPrev && newStart < origPrev.endTime) newStart = origPrev.endTime;
-                } else if (isDragging.type === 'right') {
-                    newEnd += deltaTime;
-                    const { nextClip: origNext } = getAdjacentAudioClips(isDragging.id);
-                    if (origNext && newEnd > origNext.startTime) newEnd = origNext.startTime;
-                }
-
-                if (newStart < 0) newStart = 0;
-                if (newEnd > duration) newEnd = duration;
-
-                if (newEnd - newStart < 0.1) {
-                    if (isDragging.type === 'left') newStart = newEnd - 0.1;
-                    else newEnd = newStart + 0.1;
-                }
-
-                const updatedAudioClips = localAudioClips.map(a =>
-                    a.id === isDragging.id
-                        ? { ...a, startTime: newStart, endTime: newEnd, layer: targetAudioLayer }
-                        : a
-                );
-                setLocalAudioClips(updatedAudioClips); // Local only during drag
             }
+
+            // CAPCUT STICKY BEHAVIOR: Only change track if moved >30px into the new track area
+            const STICKY_THRESHOLD = 30; // pixels
+            const stickyVisualIndex = renderLayers.indexOf(stickyLayer);
+            const stickyTrackTop = headerHeight + stickyVisualIndex * trackHeight;
+            const stickyTrackBottom = stickyTrackTop + trackHeight;
+
+            // Check if mouse has moved far enough outside current sticky track
+            if (mouseY < stickyTrackTop - STICKY_THRESHOLD) {
+                // Moving UP - snap to track above
+                const newVisualIndex = Math.max(0, stickyVisualIndex - 1);
+                stickyLayer = renderLayers[newVisualIndex] ?? stickyLayer;
+            } else if (mouseY > stickyTrackBottom + STICKY_THRESHOLD) {
+                // Moving DOWN - snap to track below
+                const newVisualIndex = Math.min(renderLayers.length - 1, stickyVisualIndex + 1);
+                stickyLayer = renderLayers[newVisualIndex] ?? stickyLayer;
+            }
+
+            // Calculate visualOffsetY for smooth clip movement
+            // The clip snaps to tracks (stickyLayer determines final position)
+            // But we also track the raw Y delta for visual feedback
+            const rawDeltaY = e.clientY - (drag.screenStartY || e.clientY);
+
+            // Calculate the Y offset from original position to sticky position
+            const originalVisualIndex = renderLayers.indexOf(originalLayer);
+            const currentStickyVisualIndex = renderLayers.indexOf(stickyLayer);
+            const trackDeltaY = (currentStickyVisualIndex - originalVisualIndex) * trackHeight;
+
+            // Update UI state
+            if (drag.target === 'clip') {
+                setDropIndicator({ time: newStart, layer: stickyLayer, gapIndex: -1, gapSize: clipDuration });
+            }
+
+            setIsDragging(prev => prev ? {
+                ...prev,
+                currentX: deltaTime,
+                currentY: rawDeltaY,
+                screenX: e.clientX,
+                screenY: e.clientY,
+                stickyLayer: stickyLayer,
+                visualOffsetY: trackDeltaY,
+                originalLayer: originalLayer
+            } : null);
         };
 
-        const handleMouseUp = () => {
-            // COMMIT ON DROP: Always auto-condense clips to ensure no overlaps/gaps
-            // COMMIT INSERT: Use Drop Indicator (Gap Logic) - ONLY for magnetic mode on V1 (gapIndex >= 0, layer === 0)
-            if (isDragging?.target === 'clip' && dropIndicator && dropIndicator.gapIndex !== undefined && dropIndicator.gapIndex >= 0 && dropIndicator.layer === 0 && magnetMode) {
-                const clip = videoClips.find(c => c.id === isDragging.id);
-                if (!clip) {
-                    setDropIndicator(null);
-                    setIsDragging(null);
-                    setDragOverlayData(null);
-                    return;
-                }
-
-                // 1. Remove clip from old position (filter)
-                const otherClips = videoClips.filter(c => c.id !== clip.id);
-
-                // 2. Identify target layer clips
-                // We need the same sorted list we used in handleMouseMove
-                const targetLayerClips = otherClips
-                    .filter(c => (c.layer || 0) === dropIndicator.layer)
-                    .sort((a, b) => a.startTime - b.startTime);
-
-                // 3. Insert into Gap Index
-                // gapIndex is an index into targetLayerClips
-                const insertIdx = Math.min(Math.max(0, dropIndicator.gapIndex), targetLayerClips.length);
-
-                const newLayerOrder = [
-                    ...targetLayerClips.slice(0, insertIdx),
-                    { ...clip, layer: dropIndicator.layer },
-                    ...targetLayerClips.slice(insertIdx)
-                ];
-
-                // 4. Condense All clips in the target layer (Ripple)
-                let finalClips: VideoClip[] = [];
-
-                // Process other layers separately (keep them as is)
-                const otherLayers = otherClips.filter(c => (c.layer || 0) !== dropIndicator.layer);
-                finalClips = [...finalClips, ...otherLayers];
-
-                // Process Target Layer (Condense)
-                let cursor = 0;
-                newLayerOrder.forEach(c => {
-                    const dur = c.endTime - c.startTime;
-                    finalClips.push({ ...c, startTime: cursor, endTime: cursor + dur });
-                    cursor += dur;
-                });
-
-                setVideoClips(finalClips);
-                onUpdateVideoClips(finalClips); // Sync immediately
-
-                // Reset playhead to beginning after reorder for better UX
-                onSeek(0);
-
-                // Skip handleDragEndSync since we just synced with correct data!
+        const handleMouseUp = (e: MouseEvent) => {
+            const drag = isDraggingRef.current;
+            if (!drag) {
                 setDropIndicator(null);
                 setIsDragging(null);
-                setDragOverlayData(null);
-                return; // Early return to avoid handleDragEndSync overwriting
-            } else if (isDragging?.target === 'clip' && isDragging?.type === 'move' && !magnetMode) {
-                // FREE MODE DROP - Apply final position on mouseup
-                const clip = videoClips.find(c => c.id === isDragging.id);
-                if (!clip) {
-                    setIsDragging(null);
-                    setDragOverlayData(null);
-                    return;
-                }
+                return;
+            }
 
-                const deltaTime = isDragging.currentX || 0;
+            const deltaX = e.clientX - drag.startX;
+            const deltaTime = deltaX / pxPerSec;
+            const clipDuration = drag.originalEnd - drag.originalStart;
 
-                // Use dropIndicator.time as the source of truth for free mode drop position
-                // This ensures consistency between the preview and the final drop position
-                let newStart: number;
-                let newEnd: number;
-                let targetLayer: number;
+            // Calculate final position (only clamp to left edge, allow extending past duration)
+            let newStart = drag.originalStart + deltaTime;
+            if (newStart < 0) newStart = 0;
+            // Note: We don't clamp to duration in free-mode - clips can extend timeline
+            const newEnd = newStart + clipDuration;
 
-                if (dropIndicator && dropIndicator.gapIndex === -1) {
-                    // Free mode: use the calculated time from dropIndicator
-                    newStart = dropIndicator.time;
-                    const clipDuration = isDragging.originalEnd - isDragging.originalStart;
-                    newEnd = newStart + clipDuration;
-                    targetLayer = dropIndicator.layer;
-                } else {
-                    // Fallback to deltaTime calculation
-                    newStart = isDragging.originalStart + deltaTime;
-                    newEnd = isDragging.originalEnd + deltaTime;
+            // Calculate final target layer
+            const clip = videoClips.find(c => c.id === drag.id);
+            let targetLayer = clip?.layer || 0;
+            if (containerRef.current && drag.target === 'clip') {
+                const containerRect = containerRef.current.getBoundingClientRect();
+                const mouseY = e.clientY - containerRect.top + containerRef.current.scrollTop;
+                const headerHeight = 24 + 64 + 6;
+                const trackHeight = 70;
+                const trackAreaY = mouseY - headerHeight;
 
-                    // Calculate target layer from mouse Y position
-                    const trackHeight = 56;
-                    const headerOffset = 100; // Approximate CC track + spacers
-                    const mouseY = isDragging.mouseY || 0;
-                    const containerRect = containerRef.current?.getBoundingClientRect();
-                    const relativeY = mouseY - (containerRect?.top || 0) - headerOffset;
-                    const layerFromTop = Math.floor(relativeY / trackHeight);
-                    targetLayer = Math.max(0, renderLayers[layerFromTop] ?? (clip.layer || 0));
-
-                    // Clamp to timeline bounds
-                    if (newStart < 0) {
-                        newEnd -= newStart;
-                        newStart = 0;
-                    }
-                    if (newEnd > duration) {
-                        newStart -= (newEnd - duration);
-                        newEnd = duration;
+                if (trackAreaY >= 0) {
+                    const visualIndex = Math.floor(trackAreaY / trackHeight);
+                    if (visualIndex >= 0 && visualIndex < renderLayers.length) {
+                        targetLayer = renderLayers[visualIndex];
                     }
                 }
+            }
 
-                // Snap to other clips if snapMode ON
-                if (snapMode) {
-                    const snapThreshold = 5 / pxPerSec;
-                    const otherClipsInLayer = videoClips.filter(c => c.id !== clip.id && (c.layer || 0) === targetLayer);
-                    for (const other of otherClipsInLayer) {
-                        if (Math.abs(newStart - other.endTime) < snapThreshold) {
-                            const shift = other.endTime - newStart;
-                            newStart = other.endTime;
-                            newEnd += shift;
-                        }
-                        if (Math.abs(newEnd - other.startTime) < snapThreshold) {
-                            const shift = other.startTime - newEnd;
-                            newEnd = other.startTime;
-                            newStart += shift;
-                        }
-                    }
-                }
-
-                const updatedClips = videoClips.map((c: VideoClip) =>
-                    c.id === isDragging.id
+            // Apply the move
+            if (drag.target === 'clip') {
+                const updatedClips = videoClips.map(c =>
+                    c.id === drag.id
                         ? { ...c, startTime: newStart, endTime: newEnd, layer: targetLayer }
                         : c
                 );
                 setVideoClips(updatedClips);
                 onUpdateVideoClips(updatedClips);
-
-                setDropIndicator(null);
-                setIsDragging(null);
-                setDragOverlayData(null);
-                return;
-            } else if (isDragging?.target === 'audio' && audioDropIndicator) {
-                // MAGNETIC REORDER DROP FOR AUDIO
-                const clip = localAudioClips.find(c => c.id === isDragging.id);
-                if (!clip) {
-                    setAudioDropIndicator(null);
-                    setIsDragging(null);
-                    setDragOverlayData(null);
-                    return;
-                }
-
-                // Get other clips (excluding dragged)
-                const otherClips = localAudioClips.filter(c => c.id !== isDragging.id);
-
-                // Get clips in target layer (excluding dragged)
-                const targetLayerClips = otherClips
-                    .filter(c => (c.layer || 0) === audioDropIndicator.layer)
-                    .sort((a, b) => a.startTime - b.startTime);
-
-                // Insert at gap position
-                const insertIdx = Math.min(Math.max(0, audioDropIndicator.gapIndex), targetLayerClips.length);
-
-                const newLayerOrder: AudioClip[] = [
-                    ...targetLayerClips.slice(0, insertIdx),
-                    { ...clip, layer: audioDropIndicator.layer },
-                    ...targetLayerClips.slice(insertIdx)
-                ];
-
-                // Condense all clips in target layer
-                let finalClips: AudioClip[] = [];
-
-                // Other layers stay as-is
-                const otherLayerClips = otherClips.filter(c => (c.layer || 0) !== audioDropIndicator.layer);
-                finalClips = [...finalClips, ...otherLayerClips];
-
-                // Condense target layer
-                let cursor = 0;
-                newLayerOrder.forEach(c => {
-                    const dur = c.endTime - c.startTime;
-                    finalClips.push({ ...c, startTime: cursor, endTime: cursor + dur });
-                    cursor += dur;
-                });
-
-                setLocalAudioClips(finalClips);
-                onUpdateAudioClips(finalClips);
-
-                setAudioDropIndicator(null);
-                setIsDragging(null);
-                setDragOverlayData(null);
-                return;
-            } else if (isDragging?.target === 'audio') {
-                // Non-move audio drags (resize) - sync as before
-                onUpdateAudioClips(localAudioClips);
+            } else if (drag.target === 'audio') {
+                const updatedAudioClips = localAudioClips.map(a =>
+                    a.id === drag.id
+                        ? { ...a, startTime: newStart, endTime: newEnd }
+                        : a
+                );
+                setLocalAudioClips(updatedAudioClips);
+                onUpdateAudioClips(updatedAudioClips);
+            } else if (drag.target === 'subtitle') {
+                onUpdateSubtitle(drag.id, newStart, newEnd);
             }
-            setDropIndicator(null);
-            setAudioDropIndicator(null);
 
-            handleDragEndSync();
+            // Reset all drag state
+            setDropIndicator(null);
             setIsDragging(null);
+            setSnapIndicator(null);
             setDragOverlayData(null);
         };
 
-        if (isDragging) {
-            window.addEventListener('mousemove', handleMouseMove);
-            window.addEventListener('mouseup', handleMouseUp);
-        }
+        window.addEventListener('mousemove', handleMouseMove);
+        window.addEventListener('mouseup', handleMouseUp);
+
         return () => {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
         };
-    }, [isDragging, pxPerSec, duration, onUpdateSubtitle, subtitles, videoClips, localAudioClips, renderLayers, handleDragEndSync, dropIndicator, getAdjacentAudioClips, onUpdateAudioClips, setLocalAudioClips, setVideoClips, onUpdateVideoClips, setDropIndicator, setIsDragging, magnetMode, snapMode]); // Added magnetMode, snapMode deps
+    }, [pxPerSec, duration, videoClips, localAudioClips, renderLayers, onUpdateVideoClips, onUpdateAudioClips, onUpdateSubtitle, setVideoClips, setLocalAudioClips, setDropIndicator, setIsDragging]);
 
     // Keyboard handling for Ripple Delete and Shortcuts
 
@@ -1430,7 +1005,7 @@ export default function TimelineEditor({
 
         if (!containerRef.current) return;
         const rect = containerRef.current.getBoundingClientRect();
-        const clickX = e.clientX - rect.left + containerRef.current.scrollLeft;
+        const clickX = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header offset
         const time = Math.max(0, Math.min(clickX / pxPerSec, duration));
 
         if (playheadRef.current) playheadRef.current.style.left = `${time * pxPerSec}px`;
@@ -1469,7 +1044,7 @@ export default function TimelineEditor({
                     container.scrollLeft += scrollDelta;
 
                     // Recalculate time/playhead because scroll changed the relative position
-                    const clickX = mouseX - rect.left + container.scrollLeft;
+                    const clickX = mouseX - rect.left + container.scrollLeft - 40; // 40px header offset
                     const time = Math.max(0, Math.min(clickX / pxPerSec, duration));
 
                     if (playheadRef.current) playheadRef.current.style.left = `${time * pxPerSec}px`;
@@ -1494,6 +1069,7 @@ export default function TimelineEditor({
         // Prevent event bubbling if clicking a known interactive element
         if ((e.target as HTMLElement).closest('.subtitle-block')) return;
         if ((e.target as HTMLElement).closest('.video-clip')) return;
+        if ((e.target as HTMLElement).closest('.video-clip-wrapper')) return;
         if ((e.target as HTMLElement).closest('.audio-clip')) return;
         if ((e.target as HTMLElement).closest('.sidebar-tools')) return;
 
@@ -1516,8 +1092,8 @@ export default function TimelineEditor({
 
     // Global mouse move for the track area operations
     const handleGlobalMouseMove = useCallback((e: MouseEvent) => {
-        // Handle Marquee Selection
-        if (interactionMode === 'select-candidate') {
+        // Handle Marquee Selection - BUT NOT when dragging a clip
+        if (interactionMode === 'select-candidate' && !isDragging) {
             if (interactionStartRef.current) {
                 const dist = Math.sqrt(Math.pow(e.clientX - interactionStartRef.current.x, 2) + Math.pow(e.clientY - interactionStartRef.current.y, 2));
                 if (dist > 5) {
@@ -1550,34 +1126,24 @@ export default function TimelineEditor({
                 const boxTop = Math.min(selectionBox.startY, currentY);
                 const boxBottom = Math.max(selectionBox.startY, currentY);
 
-                // Check Video Clips
-                // Convert time to pixels: clip.startTime * pxPerSec
-                // Y position: based on layer. Layer 0 is bottom. headerHeight=80, trackHeight=56.
-                // Need robust way to get clip Y...
-                // We can approximate or calculate same way as render.
-
+                // Check Video Clips - Updated for new layout
+                // X offset: 40px for sticky header column
+                // Y: Ruler 24px + CC row 74px + video tracks 74px each
                 const newSelection = new Set<string>();
-                const headerHeight = 80;
-                const trackHeight = 56;
+                const headerColumnOffset = 40;
+                const headerHeight = 24 + 64 + 6; // Ruler + CC row with spacer
+                const trackHeight = 70; // Video track height (h-16) + spacer (h-1.5)
 
                 videoClips.forEach(clip => {
-                    const clipX1 = clip.startTime * pxPerSec;
-                    const clipX2 = clip.endTime * pxPerSec;
-
-                    // Calculate Y
-                    // renderLayers is reversed array of [0, 1, 2...]
-                    // In UI: header + (layerIndex * trackHeight) ??
-                    // NO, renderLayers.map renders them from top to bottom.
-                    // renderLayers[0] is at top. renderLayers[0] corresponds to maxLayer.
-                    // So Y = headerHeight + (indexOf(layer) * trackHeight).
+                    const clipX1 = headerColumnOffset + clip.startTime * pxPerSec;
+                    const clipX2 = headerColumnOffset + clip.endTime * pxPerSec;
 
                     const visualIndex = renderLayers.indexOf(clip.layer || 0);
                     if (visualIndex === -1) return;
 
                     const clipY1 = headerHeight + (visualIndex * trackHeight);
-                    const clipY2 = clipY1 + trackHeight; // roughly height of track row, clip is h-12 (48px) inside h-14 (56px)
+                    const clipY2 = clipY1 + 64; // Actual track content height (h-16)
 
-                    // Check overlap
                     const overlapsX = clipX1 < boxRight && clipX2 > boxLeft;
                     const overlapsY = clipY1 < boxBottom && clipY2 > boxTop;
 
@@ -1598,7 +1164,7 @@ export default function TimelineEditor({
 
             if (containerRef.current) {
                 const rect = containerRef.current.getBoundingClientRect();
-                const x = e.clientX - rect.left + containerRef.current.scrollLeft;
+                const x = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header offset
                 const time = Math.max(0, Math.min(x / pxPerSec, duration));
                 if (playheadRef.current) playheadRef.current.style.left = `${time * pxPerSec}px`;
                 onSeek(time);
@@ -1632,7 +1198,8 @@ export default function TimelineEditor({
             setIsScrubbing(false);
         }
 
-        setIsDragging(null); // Clear item drag too
+        setIsDragging(null);
+        setSnapIndicator(null); // Clear item drag too
     }, [interactionMode, isScrubbing, duration, onSeek, pxPerSec, setSelectedClipIds, setSelectedClipId, setSelectedAudioClipId, containerRef, setInteractionMode, setSelectionBox, setIsScrubbing, setIsDragging]);
 
 
@@ -1897,14 +1464,19 @@ export default function TimelineEditor({
             setSelectedClipId(clip.id);
             setSelectedAudioClipId(null);
 
-            // Calculate grab offset
-            const grabOffset = (() => {
+            // Calculate grab offset (X and Y)
+            const { grabOffsetX, grabOffsetY } = (() => {
                 if (containerRef.current) {
                     const rect = containerRef.current.getBoundingClientRect();
-                    const clipLeftOnScreen = rect.left + (clip.startTime * pxPerSec) - containerRef.current.scrollLeft;
-                    return e.clientX - clipLeftOnScreen;
+                    const clipLeftOnScreen = rect.left + 40 + (clip.startTime * pxPerSec) - containerRef.current.scrollLeft; // 40px header
+                    const visualIndex = renderLayers.indexOf(clip.layer || 0);
+                    const clipTopOnScreen = rect.top + 24 + 64 + 6 + (visualIndex * 70) - containerRef.current.scrollTop; // ruler + CC + tracks
+                    return {
+                        grabOffsetX: e.clientX - clipLeftOnScreen,
+                        grabOffsetY: e.clientY - clipTopOnScreen
+                    };
                 }
-                return 0;
+                return { grabOffsetX: 0, grabOffsetY: 28 };
             })();
 
             // Calculate frame slots for the drag overlay
@@ -1937,7 +1509,7 @@ export default function TimelineEditor({
                 clipName: clip.name || 'Clip',
                 frameSlots,
                 slotWidth: slotWidthCalc,
-                grabOffsetX: grabOffset,
+                grabOffsetX,
                 screenX: e.clientX,
                 screenY: e.clientY,
                 waveformData: clip.waveform || audioWaveformL || [],
@@ -1956,12 +1528,13 @@ export default function TimelineEditor({
                 screenStartY: e.clientY,
                 screenX: e.clientX,
                 screenY: e.clientY,
-                grabOffsetX: grabOffset
+                grabOffsetX,
+                grabOffsetY
             });
         } else if (e.button === 2) {
             e.stopPropagation();
         }
-    }, [setSelectedClipId, setSelectedAudioClipId, setIsDragging, setDragOverlayData, pxPerSec, thumbnailAspectRatio, frameThumbnails, duration]);
+    }, [setSelectedClipId, setSelectedAudioClipId, setIsDragging, setDragOverlayData, pxPerSec, thumbnailAspectRatio, frameThumbnails, duration, renderLayers]);
 
     const handleVideoClipContextMenu = useCallback((e: React.MouseEvent, clip: VideoClip) => {
         e.preventDefault();
@@ -2156,203 +1729,166 @@ export default function TimelineEditor({
                 </div>
             </div>
 
-            <div className="flex flex-1">
-                {/* Labels Sidebar */}
-                <div className="sidebar-tools w-10 flex-shrink-0 bg-gray-50 dark:bg-zinc-800 border-r border-gray-200 dark:border-zinc-700 flex flex-col">
-                    <div className="h-6 border-b border-gray-200 dark:border-zinc-700" />
-                    {/* CC Label */}
-                    <div className="h-16 flex items-center justify-center border-b border-gray-200 dark:border-zinc-700">
-                        <span className="text-[10px] text-gray-500 dark:text-gray-400 font-bold">CC</span>
-                    </div>
-                    {/* Spacer after CC */}
-                    <div className="h-2.5 bg-white dark:bg-zinc-950" />
-                    {/* Dynamic Video Track Labels with spacers */}
-                    {renderLayers.map(layer => (
-                        <React.Fragment key={layer}>
-                            <div className="h-16 flex items-center justify-center border-b border-gray-200 dark:border-zinc-700 relative group">
-                                <span className="text-[10px] text-gray-400 font-bold">V{layer + 1}</span>
-                            </div>
-                            <div className="h-2.5 bg-white dark:bg-zinc-950" />
-                        </React.Fragment>
-                    ))}
-                    {/* Audio Track Labels with spacers */}
-                    {audioRenderLayers.map(layer => (
-                        <React.Fragment key={`audio-label-${layer}`}>
-                            <div className="h-9 flex items-center justify-center border-b border-gray-200 dark:border-zinc-700">
-                                <span className="text-[10px] text-sky-400 font-bold">A{layer + 1}</span>
-                            </div>
-                            <div className="h-2.5 bg-white dark:bg-zinc-950" />
-                        </React.Fragment>
-                    ))}
-                </div>
-
-                {/* Timeline Tracks */}
+            {/* Single Scroll Container - Unified Layout */}
+            <div className="flex-1 min-h-0 overflow-hidden">
                 <div
                     ref={containerRef}
-                    className="flex-1 overflow-x-auto overflow-y-auto relative bg-gray-100 dark:bg-zinc-950 cursor-text"
-                    onMouseDown={handleTrackMouseDown} // Changed to new handler
+                    className="w-full h-full overflow-auto relative bg-white cursor-text"
+                    onMouseDown={handleTrackMouseDown}
                     onDragOver={handleDragOver}
                     onDragLeave={handleDragLeave}
                     onDrop={handleDrop}
-                    style={{ scrollBehavior: 'smooth' }}
                 >
-                    {/* Ruler (Strict Scrubbing) */}
-                    <div
-                        className="h-6 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-800 relative cursor-ew-resize sticky top-0 z-20"
-                        style={{ width: totalWidth }}
-                        onMouseDown={handleScrubStart}
-                    >
-                        {Array.from({ length: Math.ceil(duration) + 1 }).map((_, i) => (
-                            <div key={i} className="absolute top-0 h-full flex flex-col items-start" style={{ left: i * pxPerSec }}>
-                                <div className={`w-px ${i % 5 === 0 ? 'h-3 bg-gray-400' : 'h-2 bg-gray-300'}`} />
-                                {i % 5 === 0 && <span className="text-[10px] text-gray-500 ml-0.5">{formatTime(i)}</span>}
-                            </div>
-                        ))}
+                    {/* Ruler Row with Corner Cell - Sticky Top */}
+                    <div className="flex sticky top-0 z-30">
+                        {/* Corner cell - sticky both directions */}
+                        <div className="w-10 h-6 bg-gray-100 border-b border-r border-gray-200 sticky left-0 z-40 flex-shrink-0" />
+                        {/* Ruler */}
+                        <div
+                            className="h-6 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-800 relative cursor-ew-resize flex-shrink-0"
+                            style={{ width: totalWidth }}
+                            onMouseDown={handleScrubStart}
+                        >
+                            {Array.from({ length: Math.ceil(duration) + 1 }).map((_, i) => (
+                                <div key={i} className="absolute top-0 h-full flex flex-col items-start" style={{ left: i * pxPerSec }}>
+                                    <div className={`w-px ${i % 5 === 0 ? 'h-3 bg-gray-400' : 'h-2 bg-gray-300'}`} />
+                                    {i % 5 === 0 && <span className="text-[10px] text-gray-500 ml-0.5">{formatTime(i)}</span>}
+                                </div>
+                            ))}
+                        </div>
                     </div>
 
-                    {/* Subtitles (CC Track) */}
-                    <div className="relative h-16 border-b border-gray-200 dark:border-zinc-800" style={{ width: totalWidth }}>
-                        <div className="absolute inset-0 bg-gray-200/30 dark:bg-zinc-800/30" />
-                        {subtitles.map((sub, index) => (
-                            <div
-                                key={sub.id}
-                                className={`subtitle-block absolute h-10 top-2 rounded-lg border-2 text-xs overflow-hidden flex items-center shadow-sm transition-all duration-75 
-                                    ${selectedSubtitleId === sub.id ? 'ring-2 ring-indigo-500 z-40' : ''} 
-                                    ${(externalCurrentTime || 0) >= sub.startTime && (externalCurrentTime || 0) < sub.endTime ? 'ring-2 ring-yellow-400 brightness-110 z-30 scale-[1.02]' : ''}
-                                    ${getBlockColor(index).bg} ${getBlockColor(index).border}`}
-                                style={{
-                                    left: sub.startTime * pxPerSec,
-                                    width: Math.max((sub.endTime - sub.startTime) * pxPerSec, 30),
-                                    zIndex: isDragging?.id === sub.id ? 50 : ((externalCurrentTime || 0) >= sub.startTime && (externalCurrentTime || 0) < sub.endTime ? 30 : 10)
-                                }}
-                                onMouseDown={(e) => {
-                                    e.stopPropagation();
-                                    setSelectedSubtitleId(sub.id);
-                                    setIsDragging({ id: sub.id, type: 'move', target: 'subtitle', startX: e.clientX, originalStart: sub.startTime, originalEnd: sub.endTime });
-                                }}
-                            >
-                                <span className="px-2 truncate text-white pointer-events-none">{sub.text}</span>
-                                <div className="absolute left-0 w-2 h-full cursor-ew-resize" onMouseDown={(e) => { e.stopPropagation(); setIsDragging({ id: sub.id, type: 'left', target: 'subtitle', startX: e.clientX, originalStart: sub.startTime, originalEnd: sub.endTime }) }} />
-                                <div className="absolute right-0 w-2 h-full cursor-ew-resize" onMouseDown={(e) => { e.stopPropagation(); setIsDragging({ id: sub.id, type: 'right', target: 'subtitle', startX: e.clientX, originalStart: sub.startTime, originalEnd: sub.endTime }) }} />
-                            </div>
-                        ))}
+                    {/* CC Track Row */}
+                    <div className="flex">
+                        {/* CC Header - sticky left */}
+                        <div className="w-10 h-16 flex items-center justify-center bg-gray-50 border-b border-r border-gray-200 sticky left-0 z-10 flex-shrink-0">
+                            <span className="text-[10px] text-gray-500 font-bold">CC</span>
+                        </div>
+                        {/* CC Content */}
+                        <div className="relative h-16 border-b border-gray-200 dark:border-zinc-800 flex-shrink-0" style={{ width: totalWidth }}>
+                            <div className="absolute inset-0 bg-gray-200/30 dark:bg-zinc-800/30" />
+                            {subtitles.map((sub, index) => (
+                                <div
+                                    key={sub.id}
+                                    className={`subtitle-block absolute h-10 top-2 rounded-lg border-2 text-xs overflow-hidden flex items-center shadow-sm transition-all duration-75
+                                        ${selectedSubtitleId === sub.id ? 'ring-2 ring-indigo-500 z-40' : ''}
+                                        ${(externalCurrentTime || 0) >= sub.startTime && (externalCurrentTime || 0) < sub.endTime ? 'ring-2 ring-yellow-400 brightness-110 z-30 scale-[1.02]' : ''}
+                                        ${getBlockColor(index).bg} ${getBlockColor(index).border}`}
+                                    style={{
+                                        left: sub.startTime * pxPerSec,
+                                        width: Math.max((sub.endTime - sub.startTime) * pxPerSec, 30),
+                                        zIndex: isDragging?.id === sub.id ? 50 : ((externalCurrentTime || 0) >= sub.startTime && (externalCurrentTime || 0) < sub.endTime ? 30 : 10)
+                                    }}
+                                    onMouseDown={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedSubtitleId(sub.id);
+                                        setIsDragging({ id: sub.id, type: 'move', target: 'subtitle', startX: e.clientX, originalStart: sub.startTime, originalEnd: sub.endTime });
+                                    }}
+                                >
+                                    <span className="px-2 truncate text-white pointer-events-none">{sub.text}</span>
+                                    <div className="absolute left-0 w-2 h-full cursor-ew-resize" onMouseDown={(e) => { e.stopPropagation(); setIsDragging({ id: sub.id, type: 'left', target: 'subtitle', startX: e.clientX, originalStart: sub.startTime, originalEnd: sub.endTime }) }} />
+                                    <div className="absolute right-0 w-2 h-full cursor-ew-resize" onMouseDown={(e) => { e.stopPropagation(); setIsDragging({ id: sub.id, type: 'right', target: 'subtitle', startX: e.clientX, originalStart: sub.startTime, originalEnd: sub.endTime }) }} />
+                                </div>
+                            ))}
+                        </div>
                     </div>
 
                     {/* Spacer between CC and Video tracks */}
-                    <div className="h-2.5 bg-white dark:bg-zinc-950" style={{ width: totalWidth }} />
+                    <div className="flex">
+                        <div className="w-10 h-1.5 bg-white sticky left-0 z-10 flex-shrink-0" />
+                        <div className="h-1.5 bg-white flex-shrink-0" style={{ width: totalWidth }} />
+                    </div>
 
                     {/* Dynamic Video Layers */}
                     {renderLayers.map(layerIndex => (
                         <React.Fragment key={layerIndex}>
-                            <div className="relative h-16 border-b border-gray-200 dark:border-zinc-800" style={{ width: totalWidth }}>
-                                <div className={`absolute inset-0 ${layerIndex === 0 ? 'bg-zinc-200 dark:bg-zinc-900' : 'bg-zinc-100 dark:bg-zinc-950/50'}`} />
+                            {/* Video Track Row - overflow-visible for smooth vertical drag */}
+                            <div className="flex overflow-visible">
+                                {/* Track Header - sticky left */}
+                                <div className={`w-10 h-16 flex items-center justify-center border-b border-r border-gray-200 sticky left-0 z-10 flex-shrink-0 ${layerIndex === 0 ? 'bg-gray-100' : 'bg-gray-50'}`}>
+                                    <span className="text-[10px] text-gray-600 font-bold">V{layerIndex + 1}</span>
+                                </div>
+                                {/* Track Content - overflow-visible allows clips to extend during drag */}
+                                <div className="relative h-16 border-b border-gray-200 dark:border-zinc-800 flex-shrink-0 overflow-visible" style={{ width: totalWidth }}>
+                                    <div className={`absolute inset-0 ${layerIndex === 0 ? 'bg-zinc-200 dark:bg-zinc-900' : 'bg-zinc-100 dark:bg-zinc-950/50'}`} />
 
-                                {/* Hint for new track */}
-                                {videoClips.filter(c => (c.layer || 0) === layerIndex).length === 0 && layerIndex > 0 && (
-                                    <div className="absolute inset-0 flex items-center justify-center opacity-10 pointer-events-none">
-                                        <span className="text-xs text-black dark:text-white">Track V{layerIndex + 1}</span>
-                                    </div>
-                                )}
-                                {(() => {
-                                    // Prepare clips for this layer (no longer filtering dragged clip - it moves itself)
-                                    const layerClips = videoClips
-                                        .filter(c => (c.layer || 0) === layerIndex)
-                                        .sort((a, b) => a.startTime - b.startTime);
+                                    {/* Hint for new track */}
+                                    {videoClips.filter(c => (c.layer || 0) === layerIndex).length === 0 && layerIndex > 0 && (
+                                        <div className="absolute inset-0 flex items-center justify-center opacity-10 pointer-events-none">
+                                            <span className="text-xs text-black dark:text-white">Track V{layerIndex + 1}</span>
+                                        </div>
+                                    )}
+                                    {(() => {
+                                        const layerClips = videoClips
+                                            .filter(c => (c.layer || 0) === layerIndex)
+                                            .sort((a, b) => a.startTime - b.startTime);
 
-                                    // Check if we should render a gap in this layer (ONLY for magnetic mode, gapIndex >= 0)
-                                    const showGap = dropIndicator && dropIndicator.layer === layerIndex && dropIndicator.gapIndex !== undefined && dropIndicator.gapIndex >= 0 && dropIndicator.gapSize !== undefined;
+                                        const showGap = dropIndicator && dropIndicator.layer === layerIndex && dropIndicator.gapIndex !== undefined && dropIndicator.gapIndex >= 0 && dropIndicator.gapSize !== undefined;
 
-                                    return layerClips.map((clip, index) => {
-                                        // Calculate Shift
-                                        // If we are showing a gap, and this clip's index is >= gapIndex, shift it Right.
-                                        // NOTE: This assumes gapIndex is based on the *filtered* list indices.
-                                        const isShifted = showGap && index >= (dropIndicator.gapIndex!);
-                                        const shiftAmount = isShifted ? (dropIndicator.gapSize! * pxPerSec) : 0;
+                                        return layerClips.map((clip, index) => {
+                                            const isShifted = showGap && index >= (dropIndicator.gapIndex!);
+                                            const shiftAmount = isShifted ? (dropIndicator.gapSize! * pxPerSec) : 0;
 
-                                        return (
-                                            <React.Fragment key={clip.id}>
-                                                {/* Render GHOST SLOT if this is the gap index */}
-                                                {showGap && index === dropIndicator.gapIndex && (
+                                            return (
+                                                <React.Fragment key={clip.id}>
+                                                    {/* Magnet Gap Placeholder removed - using global CapCut-style placeholder */}
+
                                                     <div
-                                                        className="absolute h-12 top-1 border-2 border-dashed border-indigo-400/50 bg-indigo-500/10 rounded-lg transition-all duration-200"
-                                                        style={{
-                                                            // Visual Gap Position
-                                                            // Use the clip's original start time as the anchor.
-                                                            left: (clip.startTime * pxPerSec),
-                                                            width: dropIndicator.gapSize! * pxPerSec,
-                                                            zIndex: 0
-                                                        }}
-                                                    />
-                                                )}
-
-                                                {/* The Clip Itself (Wrapped for Shift) */}
-                                                <div
-                                                    className="absolute inset-0 transition-transform duration-200 ease-out pointer-events-none" // Wrapper to apply transform
-                                                    style={{
-                                                        transform: `translateX(${shiftAmount}px)`,
-                                                        // Ensure the wrapper doesn't capture events, but children (clip) do. 
-                                                        // But VideoClipItem is absolute positioned?
-                                                        // If I wrap it in `absolute inset-0`, the child `left` works inside.
-                                                        // But `pointer-events-none` on wrapper might block children if not `auto`.
-                                                    }}
-                                                >
-                                                    <div className="pointer-events-auto">
-                                                        <VideoClipItem
-                                                            clip={clip}
-                                                            layerIndex={layerIndex}
-                                                            pxPerSec={pxPerSec}
-                                                            containerDuration={duration}
-                                                            isSelected={selectedClipIds.has(clip.id)}
-                                                            isCutMode={isCutMode}
-                                                            frameThumbnails={frameThumbnails}
-                                                            thumbnailAspectRatio={thumbnailAspectRatio}
-                                                            containerRef={containerRef}
-                                                            handleUnlinkAudio={handleUnlinkAudio}
-                                                            contextMenu={contextMenu}
-                                                            splitClip={splitClip}
-                                                            onMouseDown={handleVideoClipMouseDown}
-                                                            onContextMenu={handleVideoClipContextMenu}
-                                                            onDragHandle={handleVideoClipDragHandle}
-                                                            isDragging={isDragging?.id === clip.id && isDragging?.type === 'move'}
-                                                            dragOffsetX={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentX || 0) * pxPerSec : 0}
-                                                            dragOffsetY={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentY || 0) : 0}
-                                                            audioWaveformL={audioWaveformL}
-                                                            onVolumeChange={handleVolumeChange}
-                                                        />
+                                                        className="absolute inset-0 pointer-events-none"
+                                                        style={{ transform: `translateX(${shiftAmount}px)` }}
+                                                    >
+                                                        <div
+                                                            className="pointer-events-auto video-clip-wrapper"
+                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                        >
+                                                            <VideoClipItem
+                                                                clip={clip}
+                                                                layerIndex={layerIndex}
+                                                                pxPerSec={pxPerSec}
+                                                                containerDuration={duration}
+                                                                isSelected={selectedClipIds.has(clip.id)}
+                                                                isCutMode={isCutMode}
+                                                                frameThumbnails={frameThumbnails}
+                                                                thumbnailAspectRatio={thumbnailAspectRatio}
+                                                                containerRef={containerRef}
+                                                                handleUnlinkAudio={handleUnlinkAudio}
+                                                                contextMenu={contextMenu}
+                                                                splitClip={splitClip}
+                                                                onMouseDown={handleVideoClipMouseDown}
+                                                                onContextMenu={handleVideoClipContextMenu}
+                                                                onDragHandle={handleVideoClipDragHandle}
+                                                                isDragging={isDragging?.id === clip.id && isDragging?.type === 'move'}
+                                                                dragOffsetX={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentX || 0) * pxPerSec : 0}
+                                                                dragOffsetY={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentY || 0) : 0}
+                                                                audioWaveformL={audioWaveformL}
+                                                                onVolumeChange={handleVolumeChange}
+                                                            />
+                                                        </div>
                                                     </div>
-                                                </div>
-                                            </React.Fragment>
+                                                </React.Fragment>
+                                            );
+                                        }).concat(
+                                            (showGap && dropIndicator.gapIndex === layerClips.length) ? [(
+                                                <div
+                                                    key="ghost-end"
+                                                    className="absolute h-12 top-1 border-2 border-dashed border-indigo-400/50 bg-indigo-500/10 rounded-lg"
+                                                    style={{
+                                                        left: (layerClips.length > 0 ? layerClips[layerClips.length - 1].endTime : 0) * pxPerSec,
+                                                        width: dropIndicator.gapSize! * pxPerSec,
+                                                        zIndex: 0
+                                                    }}
+                                                />
+                                            )] : []
                                         );
-                                    }).concat(
-                                        // Handle Gap at the END of the list (magnetic mode)
-                                        (showGap && dropIndicator.gapIndex === layerClips.length) ? [(
-                                            <div
-                                                key="ghost-end"
-                                                className="absolute h-12 top-1 border-2 border-dashed border-indigo-400/50 bg-indigo-500/10 rounded-lg transition-all duration-200"
-                                                style={{
-                                                    left: (layerClips.length > 0 ? layerClips[layerClips.length - 1].endTime : 0) * pxPerSec,
-                                                    width: dropIndicator.gapSize! * pxPerSec,
-                                                    zIndex: 0
-                                                }}
-                                            />
-                                        )] : []
-                                    ).concat(
-                                        // Free mode drop indicator (gapIndex === -1, uses time-based positioning)
-                                        (dropIndicator && dropIndicator.layer === layerIndex && dropIndicator.gapIndex === -1 && dropIndicator.gapSize !== undefined) ? [(
-                                            <div
-                                                key="ghost-free"
-                                                className="absolute h-12 top-1 border-2 border-dashed border-indigo-400/50 bg-indigo-500/10 rounded-lg transition-all duration-200"
-                                                style={{
-                                                    left: dropIndicator.time * pxPerSec,
-                                                    width: dropIndicator.gapSize * pxPerSec,
-                                                    zIndex: 50
-                                                }}
-                                            />
-                                        )] : []
-                                    );
-                                })()}
+                                        // ghost-free placeholder removed - using global CapCut-style placeholder instead
+                                    })()}
+                                </div>
                             </div>
-                            <div className="h-2.5 bg-white dark:bg-zinc-950" style={{ width: totalWidth }} />
+                            {/* Spacer between video tracks */}
+                            <div className="flex">
+                                <div className="w-10 h-1.5 bg-white sticky left-0 z-10 flex-shrink-0" />
+                                <div className="h-1.5 bg-white flex-shrink-0" style={{ width: totalWidth }} />
+                            </div>
                         </React.Fragment>
                     ))}
 
@@ -2365,65 +1901,69 @@ export default function TimelineEditor({
 
                         return (
                             <React.Fragment key={`audio-track-${audioLayer}`}>
-                                <div className="relative h-9 border-b border-gray-200 dark:border-zinc-800" style={{ width: totalWidth }}>
-                                    {/* Background for entire track */}
-                                    <div className="absolute inset-0 bg-zinc-400/20 dark:bg-zinc-700/30" />
+                                {/* Audio Track Row */}
+                                <div className="flex">
+                                    {/* Track Header - sticky left */}
+                                    <div className="w-10 h-9 flex items-center justify-center bg-gray-50 border-b border-r border-gray-200 sticky left-0 z-10 flex-shrink-0">
+                                        <span className="text-[10px] text-sky-600 font-bold">A{audioLayer + 1}</span>
+                                    </div>
+                                    {/* Track Content */}
+                                    <div className="relative h-9 border-b border-gray-200 flex-shrink-0" style={{ width: totalWidth }}>
+                                        <div className="absolute inset-0 bg-sky-50" />
 
-                                    {/* Audio clips for this layer with gap shifting */}
-                                    {audioLayerClips.map((audioClip, index) => {
-                                        const isShifted = showAudioGap && index >= audioDropIndicator.gapIndex;
-                                        const shiftAmount = isShifted ? (audioDropIndicator.gapSize * pxPerSec) : 0;
+                                        {audioLayerClips.map((audioClip, index) => {
+                                            const isShifted = showAudioGap && index >= audioDropIndicator.gapIndex;
+                                            const shiftAmount = isShifted ? (audioDropIndicator.gapSize * pxPerSec) : 0;
 
-                                        return (
-                                            <React.Fragment key={audioClip.id}>
-                                                {/* Gap indicator before this clip */}
-                                                {showAudioGap && index === audioDropIndicator.gapIndex && (
-                                                    <div
-                                                        className="absolute top-0 bottom-0 border-2 border-dashed border-emerald-500 bg-emerald-500/10 rounded z-20"
-                                                        style={{
-                                                            left: (index > 0 ? audioLayerClips[index - 1].endTime : 0) * pxPerSec,
-                                                            width: audioDropIndicator.gapSize * pxPerSec,
-                                                            zIndex: 0
-                                                        }}
-                                                    />
-                                                )}
-                                                <div style={{ transform: `translateX(${shiftAmount}px)`, transition: 'transform 150ms ease-out' }}>
-                                                    <UnlinkedAudioClipItem
-                                                        clip={audioClip}
-                                                        pxPerSec={pxPerSec}
-                                                        containerDuration={duration}
-                                                        isSelected={selectedAudioClipId === audioClip.id}
-                                                        isCutMode={isCutMode}
-                                                        audioWaveformL={audioWaveformL}
-                                                        containerRef={containerRef}
-                                                        splitClip={splitClip}
-                                                        onMouseDown={handleAudioClipMouseDown}
-                                                        onContextMenu={handleAudioClipContextMenu}
-                                                        onDragHandle={handleAudioClipDragHandle}
-                                                    />
-                                                </div>
-                                            </React.Fragment>
-                                        );
-                                    })}
+                                            return (
+                                                <React.Fragment key={audioClip.id}>
+                                                    {showAudioGap && index === audioDropIndicator.gapIndex && (
+                                                        <div
+                                                            className="absolute top-0 bottom-0 border-2 border-dashed border-emerald-500 bg-emerald-500/10 rounded z-20"
+                                                            style={{
+                                                                left: (index > 0 ? audioLayerClips[index - 1].endTime : 0) * pxPerSec,
+                                                                width: audioDropIndicator.gapSize * pxPerSec,
+                                                                zIndex: 0
+                                                            }}
+                                                        />
+                                                    )}
+                                                    <div style={{ transform: `translateX(${shiftAmount}px)` }}>
+                                                        <UnlinkedAudioClipItem
+                                                            clip={audioClip}
+                                                            pxPerSec={pxPerSec}
+                                                            containerDuration={duration}
+                                                            isSelected={selectedAudioClipId === audioClip.id}
+                                                            isCutMode={isCutMode}
+                                                            audioWaveformL={audioWaveformL}
+                                                            containerRef={containerRef}
+                                                            splitClip={splitClip}
+                                                            onMouseDown={handleAudioClipMouseDown}
+                                                            onContextMenu={handleAudioClipContextMenu}
+                                                            onDragHandle={handleAudioClipDragHandle}
+                                                        />
+                                                    </div>
+                                                </React.Fragment>
+                                            );
+                                        })}
 
-                                    {/* Gap indicator at end of track */}
-                                    {showAudioGap && audioDropIndicator.gapIndex === audioLayerClips.length && (
-                                        <div
-                                            className="absolute top-0 bottom-0 border-2 border-dashed border-emerald-500 bg-emerald-500/10 rounded z-20"
-                                            style={{
-                                                left: (audioLayerClips.length > 0 ? audioLayerClips[audioLayerClips.length - 1].endTime : 0) * pxPerSec,
-                                                width: audioDropIndicator.gapSize * pxPerSec,
-                                                zIndex: 0
-                                            }}
-                                        />
-                                    )}
+                                        {showAudioGap && audioDropIndicator.gapIndex === audioLayerClips.length && (
+                                            <div
+                                                className="absolute top-0 bottom-0 border-2 border-dashed border-emerald-500 bg-emerald-500/10 rounded z-20"
+                                                style={{
+                                                    left: (audioLayerClips.length > 0 ? audioLayerClips[audioLayerClips.length - 1].endTime : 0) * pxPerSec,
+                                                    width: audioDropIndicator.gapSize * pxPerSec,
+                                                    zIndex: 0
+                                                }}
+                                            />
+                                        )}
+                                    </div>
                                 </div>
-                                <div className="h-2.5 bg-white dark:bg-zinc-950" style={{ width: totalWidth }} />
                             </React.Fragment>
                         );
                     })}
 
-                    <div ref={playheadRef} className="absolute top-0 bottom-0 z-50 group cursor-ew-resize" onMouseDown={handleScrubStart}>
+                    {/* Playhead - offset by 40px for sticky header */}
+                    <div ref={playheadRef} className="absolute top-0 bottom-0 z-50 group cursor-ew-resize" style={{ marginLeft: 40 }} onMouseDown={handleScrubStart}>
                         {/* Hit area */}
                         <div className="absolute inset-y-0 -left-2 -right-2 bg-transparent" />
 
@@ -2447,54 +1987,107 @@ export default function TimelineEditor({
                         />
                     )}
 
-
-                    {/* DROP INDICATOR LINE (Clean Professional Style) */}
-                    {dropIndicator && (
+                    {/* SNAP INDICATOR LINE (Yellow - CapCut/Premiere style) */}
+                    {snapIndicator && (
                         <div
-                            className="absolute z-[90] w-0.5 bg-red-500 pointer-events-none shadow-[0_0_4px_rgba(239,68,68,0.8)]"
+                            className="absolute z-[95] w-0.5 bg-yellow-400 pointer-events-none shadow-[0_0_8px_rgba(250,204,21,0.8)]"
                             style={{
-                                left: dropIndicator.time * pxPerSec,
-                                top: 80 + 24 + ((dropIndicator.layer) * 56),
-                                height: 56,
+                                left: 40 + snapIndicator.time * pxPerSec, // 40px header offset
+                                top: 0,
+                                bottom: 0,
                             }}
                         >
-                            {/* Simple triangle head at top */}
-                            <div className="absolute -top-1 -left-1.5 w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[6px] border-t-red-500" />
+                            {/* Diamond indicator at top */}
+                            <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-yellow-400 rotate-45" />
+                            {/* Diamond indicator at bottom */}
+                            <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-yellow-400 rotate-45" />
                         </div>
                     )}
 
-                    {/* GLOBAL DRAG PROXY (Follows Mouse) */}
-                    {isDragging?.type === 'move' && isDragging.target === 'clip' && isDragging.mouseX !== undefined && isDragging.mouseY !== undefined && (() => {
+                    {/* CAPCUT STYLE DROP PLACEHOLDER - Shows where clip will land */}
+                    {isDragging?.type === 'move' && isDragging?.target === 'clip' && dropIndicator && (() => {
                         const clip = videoClips.find(c => c.id === isDragging.id);
-                        if (!clip || !containerRef.current) return null;
+                        if (!clip) return null;
 
-                        const rect = containerRef.current.getBoundingClientRect();
-                        // Calculate visual left based on time to keep sync with cursor's time position
-                        // Or simpler: relative to mouse START.
-                        // We have deltaX.
-                        // Let's use Time based calculation for X to match the "Ghost" logic.
-                        const rawTime = isDragging.originalStart + (isDragging.currentX || 0);
-                        const visualLeft = rect.left + (rawTime * pxPerSec) - containerRef.current.scrollLeft;
+                        // Only show placeholder after minimum movement (5px) to prevent on click
+                        const hasMoved = isDragging.screenX && isDragging.screenStartX &&
+                            (Math.abs(isDragging.screenX - isDragging.screenStartX) > 5 ||
+                                Math.abs((isDragging.screenY || 0) - (isDragging.screenStartY || 0)) > 5);
+                        if (!hasMoved) return null;
+
+                        const clipWidth = (clip.endTime - clip.startTime) * pxPerSec;
+                        const clipHeight = 64;
+
+                        // Calculate placeholder position (matches clip horizontal position, snaps to target track)
+                        const dragX = (isDragging.currentX || 0) * pxPerSec;
+                        const originalLeft = 40 + clip.startTime * pxPerSec;
+                        const visualIndex = renderLayers.indexOf(dropIndicator.layer);
+                        const placeholderTop = 24 + 64 + 6 + (visualIndex * 70); // ruler + CC row + video rows
+                        const placeholderLeft = originalLeft + dragX; // SAME horizontal position as dragging clip
 
                         return (
-                            <div
-                                className="fixed z-[100] rounded-lg overflow-hidden border border-indigo-500/50 shadow-2xl pointer-events-none bg-slate-800/80 backdrop-blur-sm flex items-center justify-center"
-                                style={{
-                                    left: visualLeft,
-                                    top: isDragging.mouseY - 28, // Center vertically on mouse
-                                    width: Math.max((clip.endTime - clip.startTime) * pxPerSec, 20),
-                                    height: 56,
-                                }}
-                            >
-                                <span className="text-white text-xs font-medium truncate px-2 opacity-80">
-                                    {selectedClipId === clip.id ? videoFileName : `Clip ${clip.id.slice(0, 4)}`}
-                                </span>
-                                {frameThumbnails.length > 0 && (
-                                    <img src={frameThumbnails[0]} className="absolute inset-0 w-full h-full object-cover opacity-30 mix-blend-overlay" />
-                                )}
-                            </div>
+                            <>
+                                {/* DASHED PLACEHOLDER - shows target location */}
+                                <div
+                                    className="absolute z-[75] rounded-lg border-2 border-dashed border-sky-400 bg-sky-400/10 pointer-events-none"
+                                    style={{
+                                        left: placeholderLeft,
+                                        top: placeholderTop,
+                                        width: Math.max(clipWidth, 20),
+                                        height: clipHeight,
+                                    }}
+                                />
+
+                                {/* GLOBAL DRAGGING CLIP - VideoClipItem rendered at global level with full waveform */}
+                                {(() => {
+                                    const originalLayer = isDragging.originalLayer ?? (clip.layer ?? 0);
+                                    const originalVisualIndex = renderLayers.indexOf(originalLayer);
+                                    const originalTop = 24 + 64 + 6 + (originalVisualIndex * 70) + 3; // +3 for inset offset
+                                    const dragY = isDragging.currentY || 0;
+
+                                    return (
+                                        <div
+                                            className="absolute z-[90] pointer-events-none"
+                                            style={{
+                                                // VideoClipItem uses left: clip.startTime * pxPerSec internally
+                                                // So we need wrapper at: (header + dragX) to let internal left handle the rest
+                                                left: 40 + dragX, // 40 is header width, dragX is the drag offset
+                                                top: originalTop + dragY,
+                                                width: Math.max(clipWidth + clip.startTime * pxPerSec, 20), // Include space for internal left
+                                                height: clipHeight,
+                                            }}
+                                        >
+                                            <VideoClipItem
+                                                clip={clip}
+                                                layerIndex={originalLayer}
+                                                pxPerSec={pxPerSec}
+                                                containerDuration={duration}
+                                                isSelected={false}
+                                                isCutMode={false}
+                                                frameThumbnails={frameThumbnails}
+                                                thumbnailAspectRatio={thumbnailAspectRatio}
+                                                containerRef={containerRef}
+                                                handleUnlinkAudio={() => { }}
+                                                contextMenu={null}
+                                                splitClip={() => { }}
+                                                onMouseDown={() => { }}
+                                                onContextMenu={() => { }}
+                                                onDragHandle={() => { }}
+                                                isDragging={false}
+                                                dragOffsetX={0}
+                                                dragOffsetY={0}
+                                                audioWaveformL={audioWaveformL}
+                                                onVolumeChange={() => { }}
+                                            />
+                                        </div>
+                                    );
+                                })()}
+                            </>
                         );
                     })()}
+
+
+                    {/* Ghost clip removed - CapCut style uses direct clip movement via transform */}
                 </div>
             </div>
 
@@ -2561,20 +2154,8 @@ export default function TimelineEditor({
                 )
             }
 
-            {/* GLOBAL DRAG OVERLAY - React Portal to document.body, escapes ALL overflow:hidden */}
-            <DragOverlay
-                isVisible={!!dragOverlayData}
-                screenX={dragOverlayData?.screenX || 0}
-                screenY={dragOverlayData?.screenY || 0}
-                grabOffsetX={dragOverlayData?.grabOffsetX || 0}
-                clipWidth={dragOverlayData?.clipWidth || 0}
-                clipName={dragOverlayData?.clipName || 'Clip'}
-                frameSlots={dragOverlayData?.frameSlots || []}
-                slotWidth={dragOverlayData?.slotWidth || 78}
-                waveformData={dragOverlayData?.waveformData}
-                pxPerSec={pxPerSec}
-                clipDuration={dragOverlayData?.clipDuration}
-            />
+
+            {/* DragOverlay removed - CapCut style uses only placeholder, not ghost clip */}
         </div >
     );
 }
