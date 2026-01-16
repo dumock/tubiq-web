@@ -11,6 +11,7 @@ interface VideoClipItemProps {
     frameThumbnails: string[];
     thumbnailAspectRatio: number; // New prop
     isDragging?: boolean;
+    hasMoved?: boolean; // True when drag has moved beyond 5px threshold
     dragOffsetX?: number; // Offset in pixels during drag (horizontal)
     dragOffsetY?: number; // Offset in pixels during drag (vertical - for layer change)
     audioWaveformL: number[]; // Audio waveform data for CapCut-style integrated display
@@ -34,6 +35,7 @@ export const VideoClipItem = memo(({
     frameThumbnails,
     thumbnailAspectRatio, // Destructure new prop
     isDragging, // New prop
+    hasMoved = false, // True when drag has moved beyond threshold
     dragOffsetX = 0, // Offset during drag (X)
     dragOffsetY = 0, // Offset during drag (Y - for layer change)
     audioWaveformL, // Audio waveform for CapCut-style display
@@ -110,6 +112,9 @@ export const VideoClipItem = memo(({
             }
         });
     }, [clipWidth, slotWidth, pxPerSec, clip.startTime, clip.sourceStart, clip.sourceEnd, clip.frames, containerDuration, frameThumbnails]);
+
+    // Use isDragging directly to ensure clip hides when global clip appears
+    // hasMoved optimization removed to prevent dual-clip issue
 
     return (
         <div

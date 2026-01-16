@@ -1858,6 +1858,11 @@ export default function TimelineEditor({
                                                                 onContextMenu={handleVideoClipContextMenu}
                                                                 onDragHandle={handleVideoClipDragHandle}
                                                                 isDragging={isDragging?.id === clip.id && isDragging?.type === 'move'}
+                                                                hasMoved={isDragging?.id === clip.id && isDragging?.type === 'move' && !!(
+                                                                    isDragging?.screenX && isDragging?.screenStartX &&
+                                                                    (Math.abs(isDragging.screenX - isDragging.screenStartX) > 5 ||
+                                                                        Math.abs((isDragging?.screenY || 0) - (isDragging?.screenStartY || 0)) > 5)
+                                                                )}
                                                                 dragOffsetX={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentX || 0) * pxPerSec : 0}
                                                                 dragOffsetY={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentY || 0) : 0}
                                                                 audioWaveformL={audioWaveformL}
@@ -2005,15 +2010,14 @@ export default function TimelineEditor({
                     )}
 
                     {/* CAPCUT STYLE DROP PLACEHOLDER - Shows where clip will land */}
-                    {isDragging?.type === 'move' && isDragging?.target === 'clip' && dropIndicator && (() => {
+                    {isDragging?.type === 'move' && isDragging?.target === 'clip' && (() => {
                         const clip = videoClips.find(c => c.id === isDragging.id);
                         if (!clip) return null;
 
-                        // Only show placeholder after minimum movement (5px) to prevent on click
+                        // Check if moved enough for placeholder (5px threshold)
                         const hasMoved = isDragging.screenX && isDragging.screenStartX &&
                             (Math.abs(isDragging.screenX - isDragging.screenStartX) > 5 ||
                                 Math.abs((isDragging.screenY || 0) - (isDragging.screenStartY || 0)) > 5);
-                        if (!hasMoved) return null;
 
                         const clipWidth = (clip.endTime - clip.startTime) * pxPerSec;
                         const clipHeight = 64;
@@ -2021,22 +2025,24 @@ export default function TimelineEditor({
                         // Calculate placeholder position (matches clip horizontal position, snaps to target track)
                         const dragX = (isDragging.currentX || 0) * pxPerSec;
                         const originalLeft = 40 + clip.startTime * pxPerSec;
-                        const visualIndex = renderLayers.indexOf(dropIndicator.layer);
+                        const visualIndex = dropIndicator ? renderLayers.indexOf(dropIndicator.layer) : renderLayers.indexOf(clip.layer ?? 0);
                         const placeholderTop = 24 + 64 + 6 + (visualIndex * 70); // ruler + CC row + video rows
                         const placeholderLeft = originalLeft + dragX; // SAME horizontal position as dragging clip
 
                         return (
                             <>
-                                {/* DASHED PLACEHOLDER - shows target location */}
-                                <div
-                                    className="absolute z-[75] rounded-lg border-2 border-dashed border-sky-400 bg-sky-400/10 pointer-events-none"
-                                    style={{
-                                        left: placeholderLeft,
-                                        top: placeholderTop,
-                                        width: Math.max(clipWidth, 20),
-                                        height: clipHeight,
-                                    }}
-                                />
+                                {/* DASHED PLACEHOLDER - shows target location (only after 5px movement) */}
+                                {hasMoved && (
+                                    <div
+                                        className="absolute z-[75] rounded-lg border-2 border-dashed border-sky-400 bg-sky-400/10 pointer-events-none"
+                                        style={{
+                                            left: placeholderLeft,
+                                            top: placeholderTop,
+                                            width: Math.max(clipWidth, 20),
+                                            height: clipHeight,
+                                        }}
+                                    />
+                                )}
 
                                 {/* GLOBAL DRAGGING CLIP - VideoClipItem rendered at global level with full waveform */}
                                 {(() => {
