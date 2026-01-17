@@ -130,10 +130,10 @@ export const VideoClipItem = memo(({
 
     return (
         <div
-            className={`video-clip absolute inset-y-0 rounded-lg overflow-hidden cursor-pointer group select-none ${isMoveDragging
+            className={`video-clip absolute inset-y-0 rounded-lg overflow-hidden cursor-default group select-none transition-none ${isMoveDragging
                 ? 'opacity-0 pointer-events-none' // Hidden during move drag - rendered at global level to avoid track clipping
-                : 'z-0 border-2' // No transition - instant position update to prevent drop bounce
-                } ${isTrimming ? 'border-yellow-400 ring-2 ring-yellow-400 z-20' : ''} ${isSelected && !isMoveDragging && !isTrimming ? 'border-yellow-400 ring-2 ring-yellow-400 z-10' : !isMoveDragging && !isTrimming ? 'border-indigo-500 hover:border-indigo-400' : ''}`}
+                : 'z-0 border' // No transition - instant position update to prevent drop bounce
+                } ${isTrimming ? 'border-yellow-400 ring-1 ring-yellow-400 z-20' : ''} ${isSelected && !isMoveDragging && !isTrimming ? 'border-yellow-400 ring-1 ring-yellow-400 z-10' : !isMoveDragging && !isTrimming ? 'border-indigo-500 hover:border-indigo-400' : ''}`}
             style={{
                 left: visualLeft,
                 width: visualWidth,
@@ -157,6 +157,7 @@ export const VideoClipItem = memo(({
                     }
                     return;
                 }
+                e.stopPropagation();
                 onMouseDown(e, clip);
             }}
             onContextMenu={(e) => onContextMenu(e, clip)}
@@ -285,6 +286,43 @@ export const VideoClipItem = memo(({
                                     ctx.stroke();
                                 }}
                             />
+                            {/* Draggable Volume Line - Yellow line that can be dragged up/down */}
+                            <div
+                                className="absolute left-0 right-0 cursor-ns-resize group/volumeline hover:bg-yellow-400/30 transition-colors"
+                                style={{
+                                    top: audioHeight - (volume / 2) * (audioHeight - 4) - 4,
+                                    height: 6,
+                                }}
+                                onMouseDown={(e) => {
+                                    e.stopPropagation();
+                                    setIsVolumeDragging(true);
+                                    const startY = e.clientY;
+                                    const startVolume = localVolume;
+                                    let currentVolume = startVolume;
+
+                                    const handleMouseMove = (moveEvent: MouseEvent) => {
+                                        const deltaY = startY - moveEvent.clientY; // Up = increase, Down = decrease
+                                        const volumeChange = deltaY / 30; // Lower sensitivity for precise control
+                                        currentVolume = Math.max(0, Math.min(2, startVolume + volumeChange)); // 0% to 200%
+                                        setLocalVolume(currentVolume);
+                                    };
+
+                                    const handleMouseUp = () => {
+                                        setIsVolumeDragging(false);
+                                        window.removeEventListener('mousemove', handleMouseMove);
+                                        window.removeEventListener('mouseup', handleMouseUp);
+                                        if (onVolumeChange) {
+                                            onVolumeChange(clip.id, currentVolume);
+                                        }
+                                    };
+
+                                    window.addEventListener('mousemove', handleMouseMove);
+                                    window.addEventListener('mouseup', handleMouseUp);
+                                }}
+                            >
+                                {/* Yellow line visual - thin for subtle appearance */}
+                                <div className="absolute left-0 right-0 top-1/2 h-px bg-yellow-400 -translate-y-1/2" />
+                            </div>
                             {/* Volume indicator on hover */}
                             <div className={`absolute right-1 top-0.5 text-[8px] px-1 rounded transition-opacity ${isVolumeDragging ? 'opacity-100 bg-yellow-500 text-black' : 'opacity-0 group-hover/audio:opacity-100 bg-black/60 text-white'}`}>
                                 {Math.round(volume * 100)}%
@@ -312,11 +350,13 @@ export const VideoClipItem = memo(({
                         !isCutMode && !clip.isLocked && (
                             <>
                                 <div
-                                    className="absolute left-0 w-3 h-full cursor-ew-resize hover:bg-white/20 z-20"
+                                    className="absolute h-full cursor-ew-resize z-30 hover:bg-white/30 transition-colors"
+                                    style={{ left: -2, width: 8 }}
                                     onMouseDown={(e) => onDragHandle(e, clip, 'left')}
                                 />
                                 <div
-                                    className="absolute right-0 w-3 h-full cursor-ew-resize hover:bg-white/20 z-20"
+                                    className="absolute h-full cursor-ew-resize z-30 hover:bg-white/30 transition-colors"
+                                    style={{ right: -2, width: 8 }}
                                     onMouseDown={(e) => onDragHandle(e, clip, 'right')}
                                 />
                             </>
@@ -362,12 +402,15 @@ interface UnlinkedAudioClipItemProps {
     containerDuration: number;
     isSelected: boolean;
     isCutMode: boolean;
+    isDragging: boolean;
     audioWaveformL: number[]; // Pass the waveform data
     onMouseDown: (e: React.MouseEvent, clip: AudioClip) => void;
     onContextMenu: (e: React.MouseEvent, clip: AudioClip) => void;
     onDragHandle: (e: React.MouseEvent, clip: AudioClip, type: 'left' | 'right') => void;
     splitClip: (id: string, type: 'audio', time: number) => void;
     containerRef: React.RefObject<HTMLDivElement | null>;
+    trimLeftOffset?: number;
+    trimRightOffset?: number;
 }
 
 export const UnlinkedAudioClipItem = memo(({
@@ -376,12 +419,15 @@ export const UnlinkedAudioClipItem = memo(({
     containerDuration,
     isSelected,
     isCutMode,
+    isDragging,
     audioWaveformL,
     onMouseDown,
     onContextMenu,
     onDragHandle,
     splitClip,
-    containerRef
+    containerRef,
+    trimLeftOffset = 0,
+    trimRightOffset = 0
 }: UnlinkedAudioClipItemProps) => {
     const clipWidth = (clip.endTime - clip.startTime) * pxPerSec;
 
@@ -408,7 +454,7 @@ export const UnlinkedAudioClipItem = memo(({
         const waveformData = clip.waveform && clip.waveform.length > 0 ? clip.waveform : audioWaveformL;
 
         // Debug: log waveform status
-        console.log('[AudioClip] Rendering waveform for', clip.id, '| clip.waveform:', clip.waveform?.length || 0, '| global:', audioWaveformL.length, '| using:', waveformData.length);
+        // console.log('[AudioClip] Rendering waveform for', clip.id, '| clip.waveform:', clip.waveform?.length || 0, '| global:', audioWaveformL.length, '| using:', waveformData.length);
 
         if (waveformData.length > 0) {
 
@@ -456,12 +502,14 @@ export const UnlinkedAudioClipItem = memo(({
 
     }, [clip, clipWidth, audioWaveformL, containerDuration]);
 
+    const isTrimming = trimLeftOffset !== 0 || trimRightOffset !== 0;
+
     return (
         <div
-            className={`audio-clip absolute top-0 h-9 bg-emerald-900 rounded overflow-hidden border-2 cursor-pointer transition-colors duration-75 ${isSelected ? 'border-yellow-400 ring-2 ring-yellow-400 z-10' : 'border-emerald-500 hover:border-emerald-400'}`}
+            className={`audio-clip absolute top-0 h-9 bg-emerald-900 rounded overflow-hidden border-2 cursor-pointer transition-none ${isSelected && !isTrimming ? 'border-yellow-400 ring-2 ring-yellow-400 z-10' : isTrimming ? 'border-yellow-400 ring-2 ring-yellow-400 z-20' : 'border-emerald-500 hover:border-emerald-400'} ${isDragging ? 'opacity-0' : ''}`}
             style={{
-                left: clip.startTime * pxPerSec,
-                width: Math.max(clipWidth, 20),
+                left: clip.startTime * pxPerSec + trimLeftOffset,
+                width: Math.max(clipWidth - trimLeftOffset + trimRightOffset, 20),
                 height: 36
             }}
             onClick={(e) => {
@@ -484,6 +532,7 @@ export const UnlinkedAudioClipItem = memo(({
                     // Click handler above handles cut.
                     return;
                 }
+                e.stopPropagation();
                 onMouseDown(e, clip);
             }}
             onContextMenu={(e) => onContextMenu(e, clip)}

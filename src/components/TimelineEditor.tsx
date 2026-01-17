@@ -72,6 +72,10 @@ interface TimelineEditorProps {
     audioClips: AudioClip[];
     onUpdateAudioClips: (clips: AudioClip[]) => void;
     isAudioSeparated: boolean;
+    // Hybrid Engine Scrubbing
+    onStartScrub?: () => void;
+    onEndScrub?: () => void;
+    onPreviewFrame?: (time: number) => void;
 }
 
 
@@ -174,7 +178,10 @@ export default function TimelineEditor({
     isCutMode = false,
     audioClips,
     onUpdateAudioClips,
-    isAudioSeparated
+    isAudioSeparated,
+    onStartScrub,
+    onEndScrub,
+    onPreviewFrame
 }: TimelineEditorProps) {
     // Timeline State
     const [pxPerSec, setPxPerSec] = useState(100);
@@ -183,6 +190,7 @@ export default function TimelineEditor({
     const [isDragging, setIsDragging] = useState<{ id: string, type: 'left' | 'right' | 'move', target: 'clip' | 'subtitle' | 'audio', startX: number, originalStart: number, originalEnd: number, currentX?: number, currentY?: number, mouseX?: number, mouseY?: number, screenStartX?: number, screenStartY?: number, screenX?: number, screenY?: number, grabOffsetX?: number, grabOffsetY?: number, stickyLayer?: number, visualOffsetY?: number, originalLayer?: number } | null>(null);
     const isDraggingRef = useRef(isDragging); // Ref to avoid stale closure in event handlers
     isDraggingRef.current = isDragging; // Keep ref in sync with state
+    const wasPlayingRef = useRef(false); // Track play state for scrubbing
     const [dropIndicator, setDropIndicator] = useState<{ time: number, layer: number, gapIndex?: number, gapSize?: number } | null>(null);
     const [audioDropIndicator, setAudioDropIndicator] = useState<{ layer: number, gapIndex: number, gapSize: number } | null>(null);
 
@@ -905,6 +913,10 @@ export default function TimelineEditor({
                 const startShift = newStart - drag.originalStart;
                 const newSourceStart = (clip.sourceStart ?? 0) + startShift;
 
+                // Visual trim preview is handled by trimLeftOffset prop
+                // Frame preview commented out to prevent playhead interference
+                // onPreviewFrame?.(newStart);
+
                 // Update state for preview
                 setIsDragging(prev => prev ? {
                     ...prev,
@@ -926,6 +938,10 @@ export default function TimelineEditor({
                 // Clamp: can't go before start + minDuration
                 newEnd = Math.max(drag.originalStart + minDuration, newEnd);
 
+                // Visual trim preview is handled by trimRightOffset prop
+                // Frame preview commented out to prevent playhead interference
+                // onPreviewFrame?.(newEnd);
+
                 // Update state for preview
                 setIsDragging(prev => prev ? {
                     ...prev,
@@ -940,56 +956,70 @@ export default function TimelineEditor({
             const clipDuration = drag.originalEnd - drag.originalStart;
 
             // Calculate new time position (only clamp to left edge, allow extending past duration)
+            // Calculate new time position
             let newStart = drag.originalStart + deltaTime;
             if (newStart < 0) newStart = 0;
-            // Note: We don't clamp to duration in free-mode - clips can extend timeline
 
-            // Calculate target layer from mouse Y position with STICKY THRESHOLD (CapCut style)
-            const mouseY = e.clientY - containerRect.top + containerRef.current.scrollTop;
-            const headerHeight = 24 + 64 + 6; // Ruler + CC row + spacer
-            const trackHeight = 70;
-            const trackAreaY = mouseY - headerHeight;
-
-            // Get original layer from clip
-            const originalLayer = drag.originalLayer !== undefined ? drag.originalLayer : (clip?.layer ?? 0);
-            let stickyLayer = drag.stickyLayer !== undefined ? drag.stickyLayer : originalLayer;
-
-            // CAPCUT STICKY BEHAVIOR: Only change track if moved vertically from START position
-            // Use delta from drag start instead of absolute mouse position
-            const STICKY_THRESHOLD = 20; // pixels to move before switching layers
-            const dragDeltaY = e.clientY - (drag.screenStartY ?? e.clientY);
-
-            // Calculate track switch based on how far the mouse has moved from start
-            // Each track is trackHeight (70px) tall
-            const trackSwitches = Math.floor((dragDeltaY + (dragDeltaY > 0 ? STICKY_THRESHOLD : -STICKY_THRESHOLD)) / trackHeight);
-
-            if (trackSwitches !== 0) {
-                // Moving vertically - calculate new layer
-                const originalVisualIndex = renderLayers.indexOf(originalLayer);
-                if (originalVisualIndex >= 0) {
-                    // Negative trackSwitches = moving up (to higher layers in reversed array)
-                    // Positive trackSwitches = moving down (to lower layers)
-                    const newVisualIndex = Math.max(0, Math.min(renderLayers.length - 1, originalVisualIndex + trackSwitches));
-                    stickyLayer = renderLayers[newVisualIndex] ?? originalLayer;
-                }
-            } else {
-                // Within threshold - stay at original layer
-                stickyLayer = originalLayer;
-            }
-
-            // Calculate visualOffsetY for smooth clip movement
-            // The clip snaps to tracks (stickyLayer determines final position)
-            // But we also track the raw Y delta for visual feedback
+            let stickyLayer = drag.stickyLayer ?? drag.originalLayer ?? 0;
+            let visualOffsetY = 0;
             const rawDeltaY = e.clientY - (drag.screenStartY || e.clientY);
+            let originalLayer = drag.originalLayer ?? 0;
 
-            // Calculate the Y offset from original position to sticky position
-            const originalVisualIndex = renderLayers.indexOf(originalLayer);
-            const currentStickyVisualIndex = renderLayers.indexOf(stickyLayer);
-            const trackDeltaY = (currentStickyVisualIndex - originalVisualIndex) * trackHeight;
-
-            // Update UI state
             if (drag.target === 'clip') {
+                // Calculate target layer from mouse Y position with STICKY THRESHOLD (CapCut style)
+                const mouseY = e.clientY - containerRect.top + containerRef.current.scrollTop;
+                const headerHeight = 24 + 64 + 6; // Ruler + CC row + spacer
+                const trackHeight = 70;
+
+                // Get original layer from clip'
+                originalLayer = drag.originalLayer !== undefined ? drag.originalLayer : (clip?.layer ?? 0);
+                stickyLayer = drag.stickyLayer !== undefined ? drag.stickyLayer : originalLayer;
+
+                // CAPCUT STICKY BEHAVIOR
+                const STICKY_THRESHOLD = 20;
+                const trackSwitches = Math.floor((rawDeltaY + (rawDeltaY > 0 ? STICKY_THRESHOLD : -STICKY_THRESHOLD)) / trackHeight);
+
+                if (trackSwitches !== 0) {
+                    const originalVisualIndex = renderLayers.indexOf(originalLayer);
+                    if (originalVisualIndex >= 0) {
+                        const newVisualIndex = Math.max(0, Math.min(renderLayers.length - 1, originalVisualIndex + trackSwitches));
+                        stickyLayer = renderLayers[newVisualIndex] ?? originalLayer;
+                    }
+                } else {
+                    stickyLayer = originalLayer;
+                }
+
+                // Calculate visualOffsetY
+                const originalVisualIndex = renderLayers.indexOf(originalLayer);
+                const currentStickyVisualIndex = renderLayers.indexOf(stickyLayer);
+                visualOffsetY = (currentStickyVisualIndex - originalVisualIndex) * trackHeight;
+
                 setDropIndicator({ time: newStart, layer: stickyLayer, gapIndex: -1, gapSize: clipDuration });
+            } else if (drag.target === 'audio') {
+                // AUDIO LOGIC
+                const mouseY = e.clientY - containerRect.top + containerRef.current.scrollTop;
+                const headerHeight = 24 + 64 + 6; // Ruler + CC
+                const videoSectionHeight = headerHeight + (renderLayers.length * 70) + 6 + 6;
+                const audioTrackHeight = 37;
+
+                // Get original layer
+                originalLayer = drag.originalLayer ?? 0;
+                stickyLayer = drag.stickyLayer !== undefined ? drag.stickyLayer : originalLayer;
+
+                const trackAreaY = mouseY - videoSectionHeight;
+                let targetLayer = originalLayer;
+
+                if (trackAreaY >= 0) {
+                    targetLayer = Math.floor(trackAreaY / audioTrackHeight);
+                    targetLayer = Math.max(0, targetLayer);
+                } else {
+                    targetLayer = 0;
+                }
+
+                stickyLayer = targetLayer;
+                visualOffsetY = (stickyLayer - originalLayer) * audioTrackHeight;
+
+                setAudioDropIndicator({ layer: stickyLayer, gapIndex: -1, gapSize: clipDuration });
             }
 
             setIsDragging(prev => prev ? {
@@ -999,7 +1029,7 @@ export default function TimelineEditor({
                 screenX: e.clientX,
                 screenY: e.clientY,
                 stickyLayer: stickyLayer,
-                visualOffsetY: trackDeltaY,
+                visualOffsetY: visualOffsetY,
                 originalLayer: originalLayer
             } : null);
         };
@@ -1046,17 +1076,7 @@ export default function TimelineEditor({
                 setVideoClips(updatedClips);
                 onUpdateVideoClips(updatedClips);
 
-                // Sync linked audio if exists (find by videoClipId)
-                const linkedAudio = localAudioClips.find(a => a.videoClipId === clip.id);
-                if (linkedAudio) {
-                    const updatedAudioClips = localAudioClips.map(a =>
-                        a.videoClipId === clip.id
-                            ? { ...a, startTime: newStart, sourceStart: newSourceStart }
-                            : a
-                    );
-                    setLocalAudioClips(updatedAudioClips);
-                    onUpdateAudioClips(updatedAudioClips);
-                }
+                // Sync linked audio logic removed for independence of separated audio clips
 
                 setDropIndicator(null);
                 setIsDragging(null);
@@ -1092,17 +1112,7 @@ export default function TimelineEditor({
                 setVideoClips(updatedClips);
                 onUpdateVideoClips(updatedClips);
 
-                // Sync linked audio if exists (find by videoClipId)
-                const linkedAudio = localAudioClips.find(a => a.videoClipId === clip.id);
-                if (linkedAudio) {
-                    const updatedAudioClips = localAudioClips.map(a =>
-                        a.videoClipId === clip.id
-                            ? { ...a, endTime: newEnd, sourceEnd: newSourceEnd }
-                            : a
-                    );
-                    setLocalAudioClips(updatedAudioClips);
-                    onUpdateAudioClips(updatedAudioClips);
-                }
+                // Sync linked audio logic removed for independence of separated audio clips
 
                 setDropIndicator(null);
                 setIsDragging(null);
@@ -1180,9 +1190,31 @@ export default function TimelineEditor({
                 setVideoClips(updatedClips);
                 onUpdateVideoClips(updatedClips);
             } else if (drag.target === 'audio') {
+                // Calculate target Audio Layer
+                let targetLayer = clip?.layer || 0;
+
+                if (containerRef.current) {
+                    const containerRect = containerRef.current.getBoundingClientRect();
+                    const mouseY = e.clientY - containerRect.top + containerRef.current.scrollTop;
+
+                    const headerHeight = 24 + 64 + 6; // Ruler + CC
+                    const videoSectionHeight = headerHeight + (renderLayers.length * 70) + 6 + 6; // Videos + Spacers
+                    const audioTrackHeight = 37;
+
+                    const trackAreaY = mouseY - videoSectionHeight;
+
+                    if (trackAreaY >= 0) {
+                        const visualIndex = Math.floor(trackAreaY / audioTrackHeight);
+                        // Map visual index back to layer? 
+                        // audioRenderLayers = [0, 1, 2...] usually.
+                        // So targetLayer = visualIndex.
+                        targetLayer = Math.max(0, visualIndex);
+                    }
+                }
+
                 const updatedAudioClips = localAudioClips.map(a =>
                     a.id === drag.id
-                        ? { ...a, startTime: newStart, endTime: newEnd }
+                        ? { ...a, startTime: newStart, endTime: newEnd, layer: targetLayer }
                         : a
                 );
                 setLocalAudioClips(updatedAudioClips);
@@ -1196,6 +1228,7 @@ export default function TimelineEditor({
             setIsDragging(null);
             setSnapIndicator(null);
             setDragOverlayData(null);
+            setAudioDropIndicator(null);
         };
 
         window.addEventListener('mousemove', handleMouseMove);
@@ -1309,7 +1342,7 @@ export default function TimelineEditor({
         if (interactionMode === 'select-candidate' && !isDragging) {
             if (interactionStartRef.current) {
                 const dist = Math.sqrt(Math.pow(e.clientX - interactionStartRef.current.x, 2) + Math.pow(e.clientY - interactionStartRef.current.y, 2));
-                if (dist > 5) {
+                if (dist > 15) {
                     setInteractionMode('selecting');
                     if (containerRef.current) {
                         const rect = containerRef.current.getBoundingClientRect();
@@ -1409,11 +1442,13 @@ export default function TimelineEditor({
 
         if (isScrubbing) {
             setIsScrubbing(false);
+            // Use hybrid engine's endScrub (handles resume if was playing)
+            onEndScrub?.();
         }
 
         setIsDragging(null);
         setSnapIndicator(null); // Clear item drag too
-    }, [interactionMode, isScrubbing, duration, onSeek, pxPerSec, setSelectedClipIds, setSelectedClipId, setSelectedAudioClipId, containerRef, setInteractionMode, setSelectionBox, setIsScrubbing, setIsDragging]);
+    }, [interactionMode, isScrubbing, duration, onSeek, pxPerSec, setSelectedClipIds, setSelectedClipId, setSelectedAudioClipId, containerRef, setInteractionMode, setSelectionBox, setIsScrubbing, setIsDragging, onEndScrub]);
 
 
     // Attach Global Listeners
@@ -1432,10 +1467,8 @@ export default function TimelineEditor({
         e.preventDefault();
         e.stopPropagation(); // Prevent track marquee
 
-        // Force pause if playing
-        if (isPlaying && onPlayPause) {
-            onPlayPause();
-        }
+        // Use hybrid engine's startScrub (handles pause + remember state)
+        onStartScrub?.();
 
         setIsScrubbing(true);
         scrubMouseX.current = e.clientX;
@@ -1774,9 +1807,66 @@ export default function TimelineEditor({
             e.stopPropagation();
             setSelectedAudioClipId(clip.id);
             setSelectedClipId(null);
-            setIsDragging({ id: clip.id, type: 'move', target: 'audio', startX: e.clientX, originalStart: clip.startTime, originalEnd: clip.endTime });
+
+            // Calculate grab offset (X and Y)
+            const { grabOffsetX, grabOffsetY } = (() => {
+                if (containerRef.current) {
+                    const rect = containerRef.current.getBoundingClientRect();
+                    const clipLeftOnScreen = rect.left + 40 + (clip.startTime * pxPerSec) - containerRef.current.scrollLeft; // 40px header
+
+                    // Note: Audio tracks are BELOW video tracks. We need to calculate Y offset dynamically.
+                    // But simpler: just use mouse delta from top-left of clip if possible?
+                    // Let's use the same logic as video but adapted for audio layout.
+                    // Visual index for Audio is simple: render order.
+                    // Timeline layout: Ruler(24) + CC(64+2) + VideoTracks + Spacer + AudioTracks
+
+                    // Actually, let's just use e.clientX - clipLeftOnScreen for X.
+                    // For Y, allow it to snap to mouse Y initially.
+                    const mouseXCurrent = e.clientX;
+                    const mouseYCurrent = e.clientY;
+                    // Approximate grab offset
+                    return {
+                        grabOffsetX: e.clientX - clipLeftOnScreen,
+                        grabOffsetY: 18 // Middle of 36px height
+                    };
+                }
+                return { grabOffsetX: 0, grabOffsetY: 18 };
+            })();
+
+            // Set drag overlay data
+            const clipWidth = (clip.endTime - clip.startTime) * pxPerSec;
+
+            setDragOverlayData({
+                clipId: clip.id,
+                clipWidth,
+                clipName: '분리됨', // Fixed name for separated audio
+                frameSlots: [], // Audio has no frames
+                slotWidth: 0,
+                grabOffsetX,
+                screenX: e.clientX,
+                screenY: e.clientY,
+                waveformData: clip.waveform || audioWaveformL || [],
+                clipDuration: clip.endTime - clip.startTime
+            });
+
+            setIsDragging({
+                id: clip.id,
+                type: 'move',
+                target: 'audio',
+                startX: e.clientX,
+                originalStart: clip.startTime,
+                originalEnd: clip.endTime,
+                // Add extended drag props
+                screenStartX: e.clientX,
+                screenStartY: e.clientY,
+                screenX: e.clientX,
+                screenY: e.clientY,
+                grabOffsetX,
+                grabOffsetY,
+                originalLayer: clip.layer
+            });
         }
-    }, [setSelectedAudioClipId, setSelectedClipId, setIsDragging]);
+    }, [setSelectedAudioClipId, setSelectedClipId, setIsDragging, setDragOverlayData, pxPerSec, audioWaveformL]);
 
     const handleAudioClipContextMenu = useCallback((e: React.MouseEvent, clip: AudioClip) => {
         e.preventDefault();
@@ -1863,6 +1953,45 @@ export default function TimelineEditor({
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [selectedClipId, selectedAudioClipId, selectedSubtitleId, videoClips, localAudioClips, onUpdateVideoClips, onUpdateAudioClips, onDeleteSubtitle, handleSplit, handleRippleTrimLeft, handleRippleTrimRight, setLocalAudioClips, setSelectedClipId, setSelectedAudioClipId, setSelectedSubtitleId]); // Fixed dep
+
+    // Merge Audio Function
+    const handleMergeAudio = useCallback(() => {
+        // Collect all selected IDs
+        const activeSelection = new Set(selectedClipIds);
+        if (selectedClipId) activeSelection.add(selectedClipId);
+        if (selectedAudioClipId) activeSelection.add(selectedAudioClipId);
+
+        // Separate into videos and audios
+        const videosToMerge = videoClips.filter(c => activeSelection.has(c.id));
+        const audiosToMerge = localAudioClips.filter(c => activeSelection.has(c.id));
+
+        if (videosToMerge.length === 0 || audiosToMerge.length === 0) return;
+
+        const updatedVideos = [...videoClips];
+        const updatedAudios = [...localAudioClips];
+
+        // 1. Enable audio on selected videos
+        videosToMerge.forEach(v => {
+            const index = updatedVideos.findIndex(c => c.id === v.id);
+            if (index !== -1) {
+                updatedVideos[index] = { ...updatedVideos[index], hasAudio: true };
+            }
+        });
+
+        // 2. Remove selected audio clips
+        const audioIdsToRemove = new Set(audiosToMerge.map(a => a.id));
+        const finalAudios = updatedAudios.filter(a => !audioIdsToRemove.has(a.id));
+
+        onUpdateVideoClips(updatedVideos);
+        setLocalAudioClips(finalAudios);
+        onUpdateAudioClips(finalAudios);
+
+        // Clear selection and close menu
+        setSelectedClipIds(new Set());
+        setSelectedClipId(null);
+        setSelectedAudioClipId(null);
+        setContextMenu(null);
+    }, [selectedClipIds, selectedClipId, selectedAudioClipId, videoClips, localAudioClips, onUpdateVideoClips, onUpdateAudioClips, setSelectedClipIds]);
 
     return (
         <div className="w-full h-full bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-700 flex flex-col select-none">
@@ -2155,74 +2284,101 @@ export default function TimelineEditor({
                     ))}
 
                     {/* Audio Tracks - Dynamic layers (A1, A2, A3...) */}
-                    {audioRenderLayers.map(audioLayer => {
-                        const showAudioGap = audioDropIndicator && audioDropIndicator.layer === audioLayer;
-                        const audioLayerClips = localAudioClips
-                            .filter(clip => (clip.layer || 0) === audioLayer && clip.id !== isDragging?.id)
-                            .sort((a, b) => a.startTime - b.startTime);
+                    {(() => {
+                        // Dynamic Audio Layer Calculation
+                        let maxLayer = 0;
+                        localAudioClips.forEach(c => {
+                            if ((c.layer || 0) > maxLayer) maxLayer = c.layer || 0;
+                        });
 
-                        return (
-                            <React.Fragment key={`audio-track-${audioLayer}`}>
-                                {/* Audio Track Row */}
-                                <div className="flex">
-                                    {/* Track Header - sticky left */}
-                                    <div className="w-10 h-9 flex items-center justify-center bg-gray-50 border-b border-r border-gray-200 sticky left-0 z-10 flex-shrink-0">
-                                        <span className="text-[10px] text-sky-600 font-bold">A{audioLayer + 1}</span>
+                        // If dragging an audio clip to a new layer (phantom track), add it
+                        if (isDragging?.target === 'audio' && isDragging.stickyLayer !== undefined) {
+                            if (isDragging.stickyLayer > maxLayer) maxLayer = isDragging.stickyLayer;
+                        }
+
+                        // Generate array from 0 to maxLayer (e.g., if max is 2, get [0, 1, 2])
+                        const effectiveAudioLayers = Array.from({ length: maxLayer + 1 }, (_, i) => i);
+
+                        return effectiveAudioLayers.map(audioLayer => {
+                            const showAudioGap = audioDropIndicator && audioDropIndicator.layer === audioLayer && audioDropIndicator.gapIndex !== -1;
+                            const audioLayerClips = localAudioClips
+                                .filter(clip => (clip.layer || 0) === audioLayer && clip.id !== isDragging?.id)
+                                .sort((a, b) => a.startTime - b.startTime);
+
+                            return (
+                                <React.Fragment key={`audio-track-${audioLayer}`}>
+                                    {/* Audio Track Row */}
+                                    <div className="flex">
+                                        {/* Track Header - sticky left */}
+                                        <div className="w-10 h-9 flex items-center justify-center bg-gray-50 border-b border-r border-gray-200 sticky left-0 z-10 flex-shrink-0">
+                                            <span className="text-[10px] text-sky-600 font-bold">A{audioLayer + 1}</span>
+                                        </div>
+                                        {/* Track Content */}
+                                        <div className="relative h-9 border-b border-gray-200 flex-shrink-0" style={{ width: totalWidth }}>
+                                            <div className="absolute inset-0 bg-sky-50" />
+
+                                            {audioLayerClips.map((audioClip, index) => {
+                                                const isShifted = showAudioGap && index >= audioDropIndicator.gapIndex;
+                                                const shiftAmount = isShifted ? (audioDropIndicator.gapSize * pxPerSec) : 0;
+
+                                                return (
+                                                    <React.Fragment key={audioClip.id}>
+                                                        {showAudioGap && index === audioDropIndicator.gapIndex && (
+                                                            <div
+                                                                className="absolute top-0 bottom-0 border-2 border-dashed border-emerald-500 bg-emerald-500/10 rounded z-20"
+                                                                style={{
+                                                                    left: (index > 0 ? audioLayerClips[index - 1].endTime : 0) * pxPerSec,
+                                                                    width: audioDropIndicator.gapSize * pxPerSec,
+                                                                    zIndex: 0
+                                                                }}
+                                                            />
+                                                        )}
+                                                        <div style={{ transform: `translateX(${shiftAmount}px)` }}>
+                                                            <UnlinkedAudioClipItem
+                                                                clip={audioClip}
+                                                                pxPerSec={pxPerSec}
+                                                                containerDuration={duration}
+                                                                isSelected={selectedAudioClipId === audioClip.id}
+                                                                isCutMode={isCutMode}
+                                                                audioWaveformL={audioWaveformL}
+                                                                containerRef={containerRef}
+                                                                splitClip={splitClip}
+                                                                onMouseDown={handleAudioClipMouseDown}
+                                                                onContextMenu={handleAudioClipContextMenu}
+                                                                onDragHandle={handleAudioClipDragHandle}
+                                                                isDragging={isDragging?.id === audioClip.id}
+                                                                trimLeftOffset={isDragging?.id === audioClip.id && isDragging?.type === 'left' ? (isDragging?.currentX || 0) * pxPerSec : 0}
+                                                                trimRightOffset={isDragging?.id === audioClip.id && isDragging?.type === 'right' ? (isDragging?.currentX || 0) * pxPerSec : 0}
+                                                            />
+                                                        </div>
+                                                    </React.Fragment>
+                                                );
+                                            })}
+
+                                            {showAudioGap && audioDropIndicator.gapIndex === audioLayerClips.length && (
+                                                <div
+                                                    className="absolute top-0 bottom-0 border-2 border-dashed border-emerald-500 bg-emerald-500/10 rounded z-20"
+                                                    style={{
+                                                        left: (audioLayerClips.length > 0 ? audioLayerClips[audioLayerClips.length - 1].endTime : 0) * pxPerSec,
+                                                        width: audioDropIndicator.gapSize * pxPerSec,
+                                                        zIndex: 0
+                                                    }}
+                                                />
+                                            )}
+                                        </div>
                                     </div>
-                                    {/* Track Content */}
-                                    <div className="relative h-9 border-b border-gray-200 flex-shrink-0" style={{ width: totalWidth }}>
-                                        <div className="absolute inset-0 bg-sky-50" />
-
-                                        {audioLayerClips.map((audioClip, index) => {
-                                            const isShifted = showAudioGap && index >= audioDropIndicator.gapIndex;
-                                            const shiftAmount = isShifted ? (audioDropIndicator.gapSize * pxPerSec) : 0;
-
-                                            return (
-                                                <React.Fragment key={audioClip.id}>
-                                                    {showAudioGap && index === audioDropIndicator.gapIndex && (
-                                                        <div
-                                                            className="absolute top-0 bottom-0 border-2 border-dashed border-emerald-500 bg-emerald-500/10 rounded z-20"
-                                                            style={{
-                                                                left: (index > 0 ? audioLayerClips[index - 1].endTime : 0) * pxPerSec,
-                                                                width: audioDropIndicator.gapSize * pxPerSec,
-                                                                zIndex: 0
-                                                            }}
-                                                        />
-                                                    )}
-                                                    <div style={{ transform: `translateX(${shiftAmount}px)` }}>
-                                                        <UnlinkedAudioClipItem
-                                                            clip={audioClip}
-                                                            pxPerSec={pxPerSec}
-                                                            containerDuration={duration}
-                                                            isSelected={selectedAudioClipId === audioClip.id}
-                                                            isCutMode={isCutMode}
-                                                            audioWaveformL={audioWaveformL}
-                                                            containerRef={containerRef}
-                                                            splitClip={splitClip}
-                                                            onMouseDown={handleAudioClipMouseDown}
-                                                            onContextMenu={handleAudioClipContextMenu}
-                                                            onDragHandle={handleAudioClipDragHandle}
-                                                        />
-                                                    </div>
-                                                </React.Fragment>
-                                            );
-                                        })}
-
-                                        {showAudioGap && audioDropIndicator.gapIndex === audioLayerClips.length && (
-                                            <div
-                                                className="absolute top-0 bottom-0 border-2 border-dashed border-emerald-500 bg-emerald-500/10 rounded z-20"
-                                                style={{
-                                                    left: (audioLayerClips.length > 0 ? audioLayerClips[audioLayerClips.length - 1].endTime : 0) * pxPerSec,
-                                                    width: audioDropIndicator.gapSize * pxPerSec,
-                                                    zIndex: 0
-                                                }}
-                                            />
-                                        )}
+                                    {/* Spacer between audio tracks */}
+                                    <div className="flex">
+                                        <div className="w-10 h-1.5 bg-white sticky left-0 z-10 flex-shrink-0" />
+                                        <div className="h-1.5 bg-white flex-shrink-0" style={{ width: totalWidth }} />
                                     </div>
-                                </div>
-                            </React.Fragment>
-                        );
-                    })}
+                                </React.Fragment>
+                            );
+                        });
+                    })()}
+
+                    {/* Bottom Spacer to ensure space for dragging audio down */}
+                    <div className="h-10 w-full flex-shrink-0" />
 
                     {/* Playhead - offset by 40px for sticky header */}
                     <div
@@ -2275,12 +2431,11 @@ export default function TimelineEditor({
                         </div>
                     )}
 
-                    {/* CAPCUT STYLE DROP PLACEHOLDER - Shows where clip will land */}
+                    {/* VIDEO DRAG HANDLING - Placeholder and Moving Clip */}
                     {isDragging?.type === 'move' && isDragging?.target === 'clip' && (() => {
                         const clip = videoClips.find(c => c.id === isDragging.id);
                         if (!clip) return null;
 
-                        // Check if moved enough for placeholder (5px threshold)
                         const hasMoved = isDragging.screenX && isDragging.screenStartX &&
                             (Math.abs(isDragging.screenX - isDragging.screenStartX) > 5 ||
                                 Math.abs((isDragging.screenY || 0) - (isDragging.screenStartY || 0)) > 5);
@@ -2288,44 +2443,42 @@ export default function TimelineEditor({
                         const clipWidth = (clip.endTime - clip.startTime) * pxPerSec;
                         const clipHeight = 64;
 
-                        // Calculate placeholder position (matches clip horizontal position, snaps to target track)
                         const dragX = (isDragging.currentX || 0) * pxPerSec;
                         const originalLeft = 40 + clip.startTime * pxPerSec;
                         const visualIndex = dropIndicator ? renderLayers.indexOf(dropIndicator.layer) : renderLayers.indexOf(clip.layer ?? 0);
-                        const placeholderTop = 24 + 64 + 6 + (visualIndex * 70); // ruler + CC row + video rows
-                        const placeholderLeft = originalLeft + dragX; // SAME horizontal position as dragging clip
+
+                        const placeholderTop = 95 + (visualIndex * 71.5);
+                        const placeholderLeft = originalLeft + dragX;
 
                         return (
                             <>
-                                {/* DASHED PLACEHOLDER - shows target location (only after 5px movement) */}
                                 {hasMoved && (
                                     <div
-                                        className="absolute z-[75] rounded-lg border-2 border-dashed border-sky-400 bg-sky-400/10 pointer-events-none"
+                                        className="absolute border-2 border-dashed border-gray-400 bg-gray-200/50 rounded-lg z-10"
                                         style={{
                                             left: placeholderLeft,
                                             top: placeholderTop,
-                                            width: Math.max(clipWidth, 20),
+                                            width: clipWidth,
                                             height: clipHeight,
                                         }}
                                     />
                                 )}
 
-                                {/* GLOBAL DRAGGING CLIP - VideoClipItem rendered at global level with full waveform */}
                                 {(() => {
                                     const originalLayer = isDragging.originalLayer ?? (clip.layer ?? 0);
                                     const originalVisualIndex = renderLayers.indexOf(originalLayer);
-                                    const originalTop = 24 + 64 + 6 + (originalVisualIndex * 70) + 3; // +3 for inset offset
+                                    // 24 (Ruler) + 64 (CC) + 6 (Spacer) = 94px top offset
+                                    // 64 (Track) + 6 (Spacer) = 70px per video track
+                                    const originalTop = 94 + (originalVisualIndex * 70);
                                     const dragY = isDragging.currentY || 0;
 
                                     return (
                                         <div
                                             className="absolute z-[90] pointer-events-none"
                                             style={{
-                                                // VideoClipItem uses left: clip.startTime * pxPerSec internally
-                                                // So we need wrapper at: (header + dragX) to let internal left handle the rest
-                                                left: 40 + dragX, // 40 is header width, dragX is the drag offset
+                                                left: 40 + dragX,
                                                 top: originalTop + dragY,
-                                                width: Math.max(clipWidth + clip.startTime * pxPerSec, 20), // Include space for internal left
+                                                width: Math.max(clipWidth + clip.startTime * pxPerSec, 20),
                                                 height: clipHeight,
                                             }}
                                         >
@@ -2335,7 +2488,7 @@ export default function TimelineEditor({
                                                 pxPerSec={pxPerSec}
                                                 containerDuration={duration}
                                                 isSelected={false}
-                                                isCutMode={false}
+                                                isCutMode={isCutMode}
                                                 frameThumbnails={frameThumbnails}
                                                 thumbnailAspectRatio={thumbnailAspectRatio}
                                                 containerRef={containerRef}
@@ -2358,11 +2511,85 @@ export default function TimelineEditor({
                         );
                     })()}
 
+                    {/* AUDIO DRAG HANDLING - Placeholder and Moving Clip */}
+                    {isDragging?.type === 'move' && isDragging?.target === 'audio' && (() => {
+                        const clip = localAudioClips.find(c => c.id === isDragging.id);
+                        if (!clip) return null;
 
-                    {/* Ghost clip removed - CapCut style uses direct clip movement via transform */}
+                        const hasMoved = isDragging.screenX && isDragging.screenStartX &&
+                            (Math.abs(isDragging.screenX - isDragging.screenStartX) > 5 ||
+                                Math.abs((isDragging.screenY || 0) - (isDragging.screenStartY || 0)) > 5);
+
+                        const clipWidth = (clip.endTime - clip.startTime) * pxPerSec;
+                        const clipHeight = 36;
+                        const dragX = (isDragging.screenX || 0) - (isDragging.screenStartX || 0);
+                        const originalLeft = 40 + clip.startTime * pxPerSec;
+                        const videoSectionHeight = 94 + (renderLayers.length * 70);
+                        const layerIndex = isDragging.type === 'move' ? (isDragging.stickyLayer ?? clip.layer ?? 0) : (clip.layer || 0);
+                        const visualIndex = layerIndex; // Audio tracks are sequential 0..N
+
+                        // 36 (Audio Track) + 6 (Spacer) = 42px per audio track
+                        const originalTop = videoSectionHeight + ((clip.layer || 0) * 42);
+                        const ghostTop = originalTop + (isDragging.currentY || 0);
+
+                        // Placeholder position (snapped)
+                        const placeholderTop = videoSectionHeight + (visualIndex * 42);
+                        const placeholderLeft = originalLeft + dragX;
+
+                        return (
+                            <>
+                                {hasMoved && (
+                                    <div
+                                        className="absolute border-2 border-dashed border-emerald-500 bg-emerald-500/10 rounded-lg z-10"
+                                        style={{
+                                            left: placeholderLeft,
+                                            top: placeholderTop,
+                                            width: clipWidth,
+                                            height: clipHeight,
+                                        }}
+                                    />
+                                )}
+
+                                {(() => {
+                                    return (
+                                        <div
+                                            className="absolute z-[90] pointer-events-none"
+                                            style={{
+                                                left: 40 + dragX,
+                                                top: ghostTop,
+                                                width: clipWidth,
+                                                height: clipHeight,
+                                            }}
+                                        >
+                                            <UnlinkedAudioClipItem
+                                                clip={clip}
+                                                pxPerSec={pxPerSec}
+                                                containerDuration={duration}
+                                                isSelected={false}
+                                                isCutMode={isCutMode}
+                                                audioWaveformL={audioWaveformL}
+                                                containerRef={containerRef}
+                                                splitClip={() => { }}
+                                                onMouseDown={() => { }}
+                                                onContextMenu={() => { }}
+                                                onDragHandle={() => { }}
+                                                isDragging={false}
+                                            />
+                                        </div>
+                                    );
+                                })()}
+                            </>
+                        );
+                    })()}
+
+
+
+
+
+
+
                 </div>
             </div>
-
             {/* Context Menu */}
             {
                 contextMenu && (
@@ -2373,12 +2600,23 @@ export default function TimelineEditor({
                     >
                         {contextMenu.type === 'clip' && (
                             <>
-                                <button
-                                    className="w-full px-4 py-2 text-left text-sm text-white hover:bg-zinc-700 flex items-center gap-2"
-                                    onClick={() => handleUnlinkAudio(contextMenu.id)}
-                                >
-                                    🔊 오디오 분리
-                                </button>
+                                {videoClips.find(c => c.id === contextMenu.id)?.hasAudio !== false && (
+                                    <button
+                                        className="w-full px-4 py-2 text-left text-sm text-white hover:bg-zinc-700 flex items-center gap-2"
+                                        onClick={() => handleUnlinkAudio(contextMenu.id)}
+                                    >
+                                        🔊 오디오 분리
+                                    </button>
+                                )}
+                                {/* Show Merge Option if both Video and Audio are selected */}
+                                {(selectedClipIds.size > 0 && localAudioClips.some(a => selectedClipIds.has(a.id))) && (
+                                    <button
+                                        className="w-full px-4 py-2 text-left text-sm text-white hover:bg-zinc-700 flex items-center gap-2"
+                                        onClick={() => handleMergeAudio()}
+                                    >
+                                        🔊 오디오 합치기
+                                    </button>
+                                )}
                                 <button
                                     onClick={() => handleContextMenuDelete()}
                                     className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
@@ -2399,9 +2637,9 @@ export default function TimelineEditor({
                             <>
                                 <button
                                     className="w-full px-4 py-2 text-left text-sm text-white hover:bg-zinc-700 flex items-center gap-2"
-                                    onClick={() => handleRelinkAudio(contextMenu.id)}
+                                    onClick={() => handleMergeAudio()}
                                 >
-                                    🔗 비디오에 연결
+                                    🔊 오디오 합치기
                                 </button>
                                 <div className="border-t border-zinc-700 my-1" />
                                 <button

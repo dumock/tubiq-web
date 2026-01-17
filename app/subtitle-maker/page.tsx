@@ -203,12 +203,15 @@ export default function SubtitleMakerPage() {
         play,
         pause,
         togglePlay,
-        seek
+        seek,
+        startScrub,
+        endScrub,
+        previewFrame
     } = useTimelineEngine({
         videoRef: mainVideoRef, // Connect to main video element
         videoClips,
         duration,
-        shouldMuteVideo: audioClips.length > 0 || videoClips.some(c => c.hasAudio && c.isAudioLinked === false),
+        shouldMuteVideo: false, // DEPRECATED: Engine now handles per-clip muting via clip.hasAudio (was: audioClips.length > 0 || videoClips.some(c => c.hasAudio && c.isAudioLinked === false)),
         onTimeUpdate: (time) => {
             setPlaybackTime(time);
         }
@@ -3316,6 +3319,9 @@ export default function SubtitleMakerPage() {
                                         videoFileName={videoFile?.name}
                                         isPlaying={isPlaying}
                                         onPlayPause={togglePlay}
+                                        onStartScrub={startScrub}
+                                        onEndScrub={endScrub}
+                                        onPreviewFrame={previewFrame}
                                         onSplitSubtitle={handleSplitByTime}
                                         onDeleteSubtitle={handleDeleteSubtitle}
                                         videoClips={videoClips}
