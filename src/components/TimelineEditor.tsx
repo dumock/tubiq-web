@@ -198,6 +198,11 @@ export default function TimelineEditor({
     const dragProxyRef = useRef<HTMLDivElement>(null);
     const dropIndicatorRef = useRef<HTMLDivElement>(null); // For free mode red line optimization
 
+    // Real-time Trim DOM Refs
+    const trimActiveElementRef = useRef<HTMLElement | null>(null); // The clip element being trimmed
+    const trimRafRef = useRef<number | null>(null); // requestAnimationFrame ID
+    const trimOriginalDimsRef = useRef<{ left: number, width: number } | null>(null); // Original dimensions before trim
+
     // CapCut-style Timeline Mode Toggles
     const [magnetMode, setMagnetMode] = useState(true); // 메인트랙 마그넷: clips auto-condense (no gaps)
     const [snapMode, setSnapMode] = useState(true); // 자동스냅: clips snap to edges/playhead
@@ -909,21 +914,37 @@ export default function TimelineEditor({
                 // Clamp: can't go before 0, can't go past end - minDuration
                 newStart = Math.max(0, Math.min(newStart, drag.originalEnd - minDuration));
 
-                // Calculate how much source start shifts
-                const startShift = newStart - drag.originalStart;
-                const newSourceStart = (clip.sourceStart ?? 0) + startShift;
+                // Calculate trim offset in pixels
+                const trimOffset = (newStart - drag.originalStart) * pxPerSec;
 
-                // Visual trim preview is handled by trimLeftOffset prop
-                // Frame preview commented out to prevent playhead interference
-                // onPreviewFrame?.(newStart);
+                // Direct DOM manipulation for 60fps smooth updates
+                if (!trimActiveElementRef.current) {
+                    // Find and store the clip element on first move
+                    const clipEl = containerRef.current?.querySelector(`[data-clip-id="${clip.id}"]`) as HTMLElement;
+                    if (clipEl) {
+                        trimActiveElementRef.current = clipEl;
+                        trimOriginalDimsRef.current = {
+                            left: clip.startTime * pxPerSec,
+                            width: (clip.endTime - clip.startTime) * pxPerSec
+                        };
+                    }
+                }
 
-                // Update state for preview
-                setIsDragging(prev => prev ? {
-                    ...prev,
-                    currentX: deltaTime,
-                    screenX: e.clientX,
-                    screenY: e.clientY,
-                } : null);
+                // Apply DOM changes directly using rAF
+                if (trimActiveElementRef.current && trimOriginalDimsRef.current) {
+                    if (trimRafRef.current) cancelAnimationFrame(trimRafRef.current);
+                    trimRafRef.current = requestAnimationFrame(() => {
+                        const el = trimActiveElementRef.current;
+                        const orig = trimOriginalDimsRef.current;
+                        if (el && orig) {
+                            el.style.left = `${orig.left + trimOffset}px`;
+                            el.style.width = `${orig.width - trimOffset}px`;
+                        }
+                    });
+                }
+
+                // Store current delta for mouseup calculation (minimal state update)
+                isDraggingRef.current = { ...drag, currentX: deltaTime };
                 return;
             }
 
@@ -938,17 +959,43 @@ export default function TimelineEditor({
                 // Clamp: can't go before start + minDuration
                 newEnd = Math.max(drag.originalStart + minDuration, newEnd);
 
-                // Visual trim preview is handled by trimRightOffset prop
-                // Frame preview commented out to prevent playhead interference
-                // onPreviewFrame?.(newEnd);
+                // Clamp: can't extend beyond original source duration
+                const sourceDuration = clip.sourceEnd ?? (clip.endTime - clip.startTime);
+                const currentSourceStart = clip.sourceStart ?? 0;
+                const maxExtension = sourceDuration - currentSourceStart - (clip.endTime - clip.startTime);
+                const maxEnd = drag.originalEnd + maxExtension;
+                newEnd = Math.min(newEnd, maxEnd);
 
-                // Update state for preview
-                setIsDragging(prev => prev ? {
-                    ...prev,
-                    currentX: deltaTime,
-                    screenX: e.clientX,
-                    screenY: e.clientY,
-                } : null);
+                // Calculate trim offset in pixels
+                const trimOffset = (newEnd - drag.originalEnd) * pxPerSec;
+
+                // Direct DOM manipulation for 60fps smooth updates
+                if (!trimActiveElementRef.current) {
+                    // Find and store the clip element on first move
+                    const clipEl = containerRef.current?.querySelector(`[data-clip-id="${clip.id}"]`) as HTMLElement;
+                    if (clipEl) {
+                        trimActiveElementRef.current = clipEl;
+                        trimOriginalDimsRef.current = {
+                            left: clip.startTime * pxPerSec,
+                            width: (clip.endTime - clip.startTime) * pxPerSec
+                        };
+                    }
+                }
+
+                // Apply DOM changes directly using rAF
+                if (trimActiveElementRef.current && trimOriginalDimsRef.current) {
+                    if (trimRafRef.current) cancelAnimationFrame(trimRafRef.current);
+                    trimRafRef.current = requestAnimationFrame(() => {
+                        const el = trimActiveElementRef.current;
+                        const orig = trimOriginalDimsRef.current;
+                        if (el && orig) {
+                            el.style.width = `${orig.width + trimOffset}px`;
+                        }
+                    });
+                }
+
+                // Store current delta for mouseup calculation (minimal state update)
+                isDraggingRef.current = { ...drag, currentX: deltaTime };
                 return;
             }
 
@@ -1067,6 +1114,18 @@ export default function TimelineEditor({
                 const startShift = newStart - drag.originalStart;
                 const newSourceStart = Math.max(0, (clip.sourceStart ?? 0) + startShift);
 
+                // Reset DOM styles before React update (let React take over)
+                if (trimActiveElementRef.current) {
+                    trimActiveElementRef.current.style.left = '';
+                    trimActiveElementRef.current.style.width = '';
+                }
+
+                // Cleanup trim refs
+                if (trimRafRef.current) cancelAnimationFrame(trimRafRef.current);
+                trimActiveElementRef.current = null;
+                trimOriginalDimsRef.current = null;
+                trimRafRef.current = null;
+
                 // Update video clip
                 const updatedClips = videoClips.map(c =>
                     c.id === drag.id
@@ -1102,6 +1161,18 @@ export default function TimelineEditor({
                 const endShift = newEnd - drag.originalEnd;
                 const currentSourceEnd = clip.sourceEnd ?? (clip.endTime - clip.startTime);
                 const newSourceEnd = Math.max(clip.sourceStart ?? 0, currentSourceEnd + endShift);
+
+                // Reset DOM styles before React update (let React take over)
+                if (trimActiveElementRef.current) {
+                    trimActiveElementRef.current.style.left = '';
+                    trimActiveElementRef.current.style.width = '';
+                }
+
+                // Cleanup trim refs
+                if (trimRafRef.current) cancelAnimationFrame(trimRafRef.current);
+                trimActiveElementRef.current = null;
+                trimOriginalDimsRef.current = null;
+                trimRafRef.current = null;
 
                 // Update video clip
                 const updatedClips = videoClips.map(c =>

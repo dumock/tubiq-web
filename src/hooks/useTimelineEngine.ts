@@ -175,16 +175,22 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
         const video = videoRef.current;
         if (!video) return;
 
-        const clip = activeClipRef.current;
-        const shouldMute = shouldMuteVideo || (clip?.hasAudio === false);
-        if (video.muted !== shouldMute) {
-            video.muted = shouldMute;
-        }
+        // Get current clip at current time for accurate hasAudio check
+        const clip = findActiveClip(currentTime);
 
-        // Sync volume (0-2 range to 0-1 clamped)
-        const clipVolume = clip?.volume ?? 1.0;
-        video.volume = Math.min(1, Math.max(0, clipVolume));
-    }, [videoRef, shouldMuteVideo, currentTime, videoClips]);
+        // Mute if: globally muted OR current clip has no audio (was separated)
+        const shouldMute = shouldMuteVideo || (clip?.hasAudio === false);
+        video.muted = shouldMute;
+
+        // Also set volume to 0 as backup when audio is separated (redundant safety)
+        if (clip?.hasAudio === false) {
+            video.volume = 0;
+        } else {
+            // Sync volume (0-2 range to 0-1 clamped)
+            const clipVolume = clip?.volume ?? 1.0;
+            video.volume = Math.min(1, Math.max(0, clipVolume));
+        }
+    }, [videoRef, shouldMuteVideo, currentTime, videoClips, findActiveClip]);
 
     // =========================================================
     // Play / Pause / Toggle
@@ -296,19 +302,7 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
     // Seek (used during scrubbing and click-to-seek)
     // =========================================================
     const seek = useCallback((time: number) => {
-        // Throttle seeks during scrubbing for smooth preview
-        const now = performance.now();
-        const THROTTLE_MS = 30; // ~33fps max seek rate
-
-        if (isScrubbing && now - lastSeekTime.current < THROTTLE_MS) {
-            // Store pending seek to ensure final position is accurate
-            pendingSeek.current = time;
-            return;
-        }
-        lastSeekTime.current = now;
-        pendingSeek.current = null;
-
-        // Update timeline state
+        // Update timeline state immediately for responsive UI
         setCurrentTime(time);
         onTimeUpdate(time);
 
@@ -327,13 +321,9 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
                 }
             }
 
-            // Seek video to show frame - use fastSeek if available for smoother scrubbing
+            // Seek video to show frame - use direct currentTime for reliable updates
             const targetVideoTime = timelineTimeToVideoTime(time, clip);
-            if ('fastSeek' in video && typeof video.fastSeek === 'function') {
-                video.fastSeek(targetVideoTime);
-            } else {
-                video.currentTime = targetVideoTime;
-            }
+            video.currentTime = targetVideoTime;
         }
     }, [videoClips, onTimeUpdate, videoRef, findActiveClip, isScrubbing]);
 

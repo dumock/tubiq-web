@@ -1204,6 +1204,9 @@ export default function SubtitleMakerPage() {
                     }
 
                     console.log(`Local clip added to V${newLayer + 1} at ${snapStartTime}:`, clipId);
+
+                    // Prevent duplicate clip creation from initialization useEffect
+                    hasInitializedClips.current = true;
                 };
 
                 // Background upload
@@ -3311,7 +3314,7 @@ export default function SubtitleMakerPage() {
                                                 s.id === id ? { ...s, startTime: start, endTime: end } : s
                                             ));
                                         }}
-                                        onSeek={handleTimelineSeek}
+                                        onSeek={seek}
                                         excludedSubtitleIds={excludedSubtitleIds}
                                         onToggleExclude={handleToggleExclude}
                                         videoElement={mainVideoElement}

@@ -130,6 +130,7 @@ export const VideoClipItem = memo(({
 
     return (
         <div
+            data-clip-id={clip.id}
             className={`video-clip absolute inset-y-0 rounded-lg overflow-hidden cursor-default group select-none transition-none ${isMoveDragging
                 ? 'opacity-0 pointer-events-none' // Hidden during move drag - rendered at global level to avoid track clipping
                 : 'z-0 border' // No transition - instant position update to prevent drop bounce
