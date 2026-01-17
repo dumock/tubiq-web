@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(./node_modules/.bin/tsc:*)"
+      "Bash(./node_modules/.bin/tsc:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run build:*)",
+      "Bash(npx eslint:*)",
+      "Bash(timeout 30 npm run dev:webpack)",
+      "Bash(timeout 45 npm run dev:*)",
+      "Bash(npm run dev:*)",
+      "Bash(timeout:*)"
     ]
   }
 }

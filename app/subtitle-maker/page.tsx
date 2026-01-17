@@ -1360,10 +1360,10 @@ export default function SubtitleMakerPage() {
 
             if (canvas && ctx) {
                 // 2. Identify Active Clips at Current Time
-                // We use the Main Video's time as the source of truth if playing, else state time
-                const masterTime = mainVideoElement && !mainVideoElement.paused
-                    ? mainVideoElement.currentTime
-                    : playbackTime;
+                // CRITICAL: Always use playbackTime (timeline time) for clip filtering
+                // mainVideoElement.currentTime is VIDEO SOURCE time, not timeline time!
+                // After a gap, video.currentTime (e.g., 5.72) doesn't match timeline time (e.g., 9.60)
+                const masterTime = playbackTime;
 
                 const activeClips = videoClips
                     .filter(c => masterTime >= c.startTime && masterTime < c.endTime && !c.isHidden)

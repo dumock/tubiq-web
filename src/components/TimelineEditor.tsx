@@ -394,6 +394,7 @@ export default function TimelineEditor({
 
     // Smooth playhead & Scrubbing state
     const playheadRef = useRef<HTMLDivElement>(null);
+    const prevPlayheadTimeRef = useRef<number>(0); // Track previous time to prevent backward jumps
 
     // Sequencer State
     const activeClipRef = useRef<VideoClip | null>(null);
@@ -414,7 +415,47 @@ export default function TimelineEditor({
         const updatePlayhead = () => {
             let time: number;
 
-            if (isPlaying && videoElement && videoClips.length > 0) {
+            // SIMPLIFIED PLAYHEAD LOGIC:
+            // 1. Always trust externalCurrentTime as the authoritative source
+            // 2. Use video.currentTime only for smooth interpolation when safe
+            // 3. Avoid complex clip matching that can fail at boundaries
+
+            // Check if we're in a gap or transition (video paused while playing)
+            const isInGapOrTransition = isPlaying && videoElement?.paused && externalCurrentTime !== undefined;
+
+            if (isInGapOrTransition) {
+                // Gap/transition: use externalCurrentTime directly (updated at 60fps by gap timer)
+                time = externalCurrentTime;
+            } else if (isPlaying && videoElement && !videoElement.paused && externalCurrentTime !== undefined) {
+                // Normal clip playback: use externalCurrentTime as base, interpolate with video.currentTime
+                const vTime = videoElement.currentTime;
+
+                // Find the expected clip based on externalCurrentTime (source of truth)
+                const expectedClip = videoClips.find(c =>
+                    externalCurrentTime >= c.startTime && externalCurrentTime < c.endTime &&
+                    (c.layer === 0 || c.layer === undefined)
+                );
+
+                if (expectedClip) {
+                    // Check if video.currentTime is within expected range for this clip
+                    const vTimeInClipRange = vTime >= expectedClip.sourceStart - 0.1 && vTime < expectedClip.sourceEnd + 0.1;
+
+                    if (vTimeInClipRange) {
+                        // Safe to use video.currentTime for smooth interpolation
+                        time = expectedClip.startTime + (vTime - expectedClip.sourceStart);
+                    } else {
+                        // Video position doesn't match expected clip - use externalCurrentTime
+                        // This can happen during transitions or when seeking
+                        time = externalCurrentTime;
+                    }
+                } else {
+                    // No clip found at externalCurrentTime - might be in gap or at boundary
+                    time = externalCurrentTime;
+                }
+            } else if (isPlaying && externalCurrentTime !== undefined) {
+                // Fallback for playing state
+                time = externalCurrentTime;
+            } else if (isPlaying && videoElement && videoClips.length > 0) {
                 // SEQUENCER LOGIC:
                 // 1. Determine Current Clip based on last known time or continuity
                 let clip = activeClipRef.current;
@@ -484,27 +525,26 @@ export default function TimelineEditor({
             }
 
             if (playheadRef.current && (isPlaying || externalCurrentTime !== undefined) && !isScrubbing) {
-                const currentPx = time * pxPerSec;
-                playheadRef.current.style.left = `${currentPx}px`; // marginLeft: 40 handles the offset
-
-                // Auto-center logic - DISABLED to prevent stuttering
-                // Users can manually scroll to follow the playhead if needed
-                /*
-                if (containerRef.current) {
-                    const container = containerRef.current;
-                    const containerWidth = container.clientWidth;
-                    const halfWidth = containerWidth / 2;
-                    const targetScrollLeft = currentPx - halfWidth;
-
-                    if (isPlaying) {
-                        const currentScrollLeft = container.scrollLeft;
-                        const diff = targetScrollLeft - currentScrollLeft;
-                        if (Math.abs(diff) > 50) {
-                            container.scrollLeft = currentScrollLeft + diff * 0.1;
-                        }
+                // ANTI-JITTER: Prevent backward jumps during playback
+                // If playing and time jumps backward more than threshold, keep previous position
+                const maxBackwardJump = 0.1; // seconds (tighter threshold)
+                if (isPlaying && prevPlayheadTimeRef.current > 0) {
+                    const timeDiff = time - prevPlayheadTimeRef.current;
+                    if (timeDiff < -maxBackwardJump) {
+                        // Backward jump detected - keep previous time and advance slightly
+                        time = prevPlayheadTimeRef.current + 0.016; // ~1 frame forward
                     }
                 }
-                */
+
+                // Update ref only when playing, reset when paused so next play starts fresh
+                if (isPlaying) {
+                    prevPlayheadTimeRef.current = time;
+                } else {
+                    prevPlayheadTimeRef.current = 0;
+                }
+
+                const currentPx = time * pxPerSec;
+                playheadRef.current.style.left = `${currentPx}px`; // marginLeft: 40 handles the offset
             }
             animationFrameId = requestAnimationFrame(updatePlayhead);
         };
