@@ -1541,6 +1541,9 @@ export default function SubtitleMakerPage() {
         console.log('[Mute Sync] V1 muted:', isV1Muted, 'hasUnlinkedAudio:', hasUnlinkedAudio, 'hasSeparatedAudio:', hasSeparatedAudio, 'video.muted:', video.muted);
     }, [mainVideoElement, videoClips, audioClips]);
 
+    // Track current audio clip to detect transitions
+    const currentAudioClipRef = useRef<string | null>(null);
+
     // Audio Engine (for Separated Audio)
     useEffect(() => {
         const audioEl = audioRef.current;
@@ -1549,6 +1552,7 @@ export default function SubtitleMakerPage() {
         // Play audio if there are separated audio clips
         if (audioClips.length === 0) {
             if (!audioEl.paused) audioEl.pause();
+            currentAudioClipRef.current = null;
             return;
         }
 
@@ -1556,10 +1560,25 @@ export default function SubtitleMakerPage() {
         const clip = audioClips.find(c => currentTime >= c.startTime && currentTime < c.endTime);
 
         if (clip) {
+            // Detect clip transition
+            const isNewClip = currentAudioClipRef.current !== clip.id;
+
+            if (isNewClip) {
+                // CRITICAL: Stop previous audio immediately before switching
+                audioEl.pause();
+                audioEl.currentTime = 0;
+                currentAudioClipRef.current = clip.id;
+            }
+
             // Use clip's own source (from video it was separated from)
             const src = clip.src || videoUrl;
-            if (src && audioEl.src !== src && !audioEl.src.includes(src)) {
+            const currentSrc = audioEl.src || '';
+            const needsSourceChange = src && !currentSrc.includes(src) && currentSrc !== src;
+
+            if (needsSourceChange) {
+                audioEl.pause();
                 audioEl.src = src;
+                audioEl.load(); // Ensure new source is loaded
             }
 
             const offset = currentTime - clip.startTime;
@@ -1568,15 +1587,20 @@ export default function SubtitleMakerPage() {
             if (Number.isFinite(sourceTime)) {
                 const drift = Math.abs(audioEl.currentTime - sourceTime);
                 if (isPlaying) {
+                    // Sync time first, then play
+                    if (drift > 0.1 || isNewClip) {
+                        audioEl.currentTime = sourceTime;
+                    }
                     if (audioEl.paused) audioEl.play().catch(() => { });
-                    if (drift > 0.1) audioEl.currentTime = sourceTime;
                 } else {
                     if (!audioEl.paused) audioEl.pause();
                     if (drift > 0.1) audioEl.currentTime = sourceTime;
                 }
             }
         } else {
+            // Not in any audio clip - stop audio
             if (!audioEl.paused) audioEl.pause();
+            currentAudioClipRef.current = null;
         }
     }, [currentTime, audioClips, isPlaying, videoUrl]);
 

@@ -445,7 +445,7 @@ export const UnlinkedAudioClipItem = memo(({
         if (!ctx) return;
 
         const width = Math.max(clipWidth, 20);
-        const height = 36;
+        const height = 40;
         canvas.width = width;
         canvas.height = height;
 
@@ -509,11 +509,11 @@ export const UnlinkedAudioClipItem = memo(({
 
     return (
         <div
-            className={`audio-clip absolute top-0 h-9 bg-emerald-900 rounded overflow-hidden border-2 cursor-pointer transition-none ${isSelected && !isTrimming ? 'border-orange-500 ring-2 ring-orange-500 z-10' : isTrimming ? 'border-orange-500 ring-2 ring-orange-500 z-20' : 'border-emerald-500 hover:border-emerald-400'} ${isDragging ? 'opacity-0' : ''}`}
+            className={`audio-clip absolute top-0 h-10 bg-emerald-900 rounded overflow-hidden border-2 cursor-pointer transition-none ${isSelected && !isTrimming ? 'border-orange-500 ring-2 ring-orange-500 z-10' : isTrimming ? 'border-orange-500 ring-2 ring-orange-500 z-20' : 'border-emerald-500 hover:border-emerald-400'} ${isDragging ? 'opacity-0' : ''}`}
             style={{
                 left: clip.startTime * pxPerSec + trimLeftOffset,
                 width: Math.max(clipWidth - trimLeftOffset + trimRightOffset, 20),
-                height: 36
+                height: 40
             }}
             onClick={(e) => {
                 e.stopPropagation();

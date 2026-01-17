@@ -1361,20 +1361,83 @@ export default function TimelineEditor({
 
                     if (trackAreaY >= 0) {
                         const visualIndex = Math.floor(trackAreaY / audioTrackHeight);
-                        // Map visual index back to layer? 
-                        // audioRenderLayers = [0, 1, 2...] usually.
-                        // So targetLayer = visualIndex.
                         targetLayer = Math.max(0, visualIndex);
                     }
                 }
 
-                const updatedAudioClips = localAudioClips.map(a =>
-                    a.id === drag.id
-                        ? { ...a, startTime: newStart, endTime: newEnd, layer: targetLayer }
-                        : a
+                // COLLISION DETECTION: Check if new position overlaps with other audio clips in same layer
+                const movingClipDuration = newEnd - newStart;
+                const otherClipsInLayer = localAudioClips.filter(a =>
+                    a.id !== drag.id && (a.layer || 0) === targetLayer
                 );
-                setLocalAudioClips(updatedAudioClips);
-                onUpdateAudioClips(updatedAudioClips);
+
+                const hasCollision = otherClipsInLayer.some(other =>
+                    newStart < other.endTime && newEnd > other.startTime
+                );
+
+                if (hasCollision) {
+                    // Find a free position or revert
+                    // Strategy: Try to find the nearest gap that fits the clip
+                    let foundPosition = false;
+                    let adjustedStart = newStart;
+
+                    // Sort clips by start time
+                    const sortedClips = [...otherClipsInLayer].sort((a, b) => a.startTime - b.startTime);
+
+                    // Try placing before first clip
+                    if (sortedClips.length > 0 && sortedClips[0].startTime >= movingClipDuration) {
+                        const gapEnd = sortedClips[0].startTime;
+                        if (gapEnd >= movingClipDuration) {
+                            adjustedStart = Math.max(0, gapEnd - movingClipDuration);
+                            foundPosition = true;
+                        }
+                    }
+
+                    // Try placing in gaps between clips
+                    if (!foundPosition) {
+                        for (let i = 0; i < sortedClips.length - 1; i++) {
+                            const gapStart = sortedClips[i].endTime;
+                            const gapEnd = sortedClips[i + 1].startTime;
+                            const gapSize = gapEnd - gapStart;
+
+                            if (gapSize >= movingClipDuration) {
+                                adjustedStart = gapStart;
+                                foundPosition = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Try placing after last clip
+                    if (!foundPosition && sortedClips.length > 0) {
+                        adjustedStart = sortedClips[sortedClips.length - 1].endTime;
+                        foundPosition = true;
+                    }
+
+                    // If no gap found, place at start (layer 0 case with no clips)
+                    if (!foundPosition) {
+                        adjustedStart = 0;
+                    }
+
+                    const adjustedEnd = adjustedStart + movingClipDuration;
+
+                    const updatedAudioClips = localAudioClips.map(a =>
+                        a.id === drag.id
+                            ? { ...a, startTime: adjustedStart, endTime: adjustedEnd, layer: targetLayer }
+                            : a
+                    );
+                    setLocalAudioClips(updatedAudioClips);
+                    onUpdateAudioClips(updatedAudioClips);
+                } else {
+                    // No collision - apply move normally
+                    const updatedAudioClips = localAudioClips.map(a =>
+                        a.id === drag.id
+                            ? { ...a, startTime: newStart, endTime: newEnd, layer: targetLayer }
+                            : a
+                    );
+                    setLocalAudioClips(updatedAudioClips);
+                    onUpdateAudioClips(updatedAudioClips);
+                }
             } else if (drag.target === 'subtitle') {
                 onUpdateSubtitle(drag.id, newStart, newEnd);
             }
@@ -2615,11 +2678,11 @@ export default function TimelineEditor({
                                     {/* Audio Track Row */}
                                     <div className="flex">
                                         {/* Track Header - sticky left */}
-                                        <div className="w-10 h-9 flex items-center justify-center bg-gray-50 border-b border-r border-gray-200 sticky left-0 z-10 flex-shrink-0">
+                                        <div className="w-10 h-10 flex items-center justify-center bg-gray-50 border-b border-r border-gray-200 sticky left-0 z-10 flex-shrink-0">
                                             <span className="text-[10px] text-sky-600 font-bold">A{audioLayer + 1}</span>
                                         </div>
                                         {/* Track Content */}
-                                        <div className="relative h-9 border-b border-gray-200 flex-shrink-0 overflow-hidden" style={{ width: totalWidth }}>
+                                        <div className="relative h-10 border-b border-gray-200 flex-shrink-0" style={{ width: totalWidth }}>
                                             <div className="absolute inset-0 bg-sky-50" />
 
                                             {audioLayerClips.map((audioClip, index) => {
@@ -2772,23 +2835,34 @@ export default function TimelineEditor({
                                 {(() => {
                                     const originalLayer = isDragging.originalLayer ?? (clip.layer ?? 0);
                                     const originalVisualIndex = renderLayers.indexOf(originalLayer);
-                                    // 24 (Ruler) + 64 (CC) + 6 (Spacer) = 94px top offset
-                                    // 64 (Track) + 6 (Spacer) = 70px per video track
-                                    const originalTop = 94 + (originalVisualIndex * 70);
+
+                                    // Calculate originalTop accurately (V1=86, others=71)
+                                    let originalTop = 94; // Header: Ruler(24) + CC(64) + spacer(6)
+                                    for (let i = 0; i < originalVisualIndex; i++) {
+                                        originalTop += (renderLayers[i] === 0) ? 86 : 71;
+                                    }
+
                                     const dragY = isDragging.currentY || 0;
+                                    const ghostLeft = originalLeft + dragX;
+
+                                    // Height: V1=80, others=65
+                                    const ghostHeight = (originalLayer === 0) ? 80 : 65;
+
+                                    // Create ghost clip with startTime=0 to prevent double left calculation
+                                    const ghostClip = { ...clip, startTime: 0, endTime: clip.endTime - clip.startTime };
 
                                     return (
                                         <div
                                             className="absolute z-[90] pointer-events-none"
                                             style={{
-                                                left: 40 + dragX,
+                                                left: ghostLeft,
                                                 top: originalTop + dragY,
-                                                width: Math.max(clipWidth + clip.startTime * pxPerSec, 20),
-                                                height: clipHeight,
+                                                width: clipWidth,
+                                                height: ghostHeight,
                                             }}
                                         >
                                             <VideoClipItem
-                                                clip={clip}
+                                                clip={ghostClip}
                                                 layerIndex={originalLayer}
                                                 pxPerSec={pxPerSec}
                                                 containerDuration={duration}
@@ -2829,11 +2903,22 @@ export default function TimelineEditor({
                         const clipHeight = 36;
                         const dragX = (isDragging.screenX || 0) - (isDragging.screenStartX || 0);
                         const originalLeft = 40 + clip.startTime * pxPerSec;
-                        const videoSectionHeight = 94 + (renderLayers.length * 70);
+
+                        // Calculate video section height accurately (V1=86, others=71)
+                        // Header: Ruler(24) + CC(64) + spacer(6) = 94
+                        // Each video track already includes its spacer: V1=80+6=86, V2+=65+6=71
+                        const headerHeight = 24 + 64 + 6; // = 94
+                        let videoTracksHeight = 0;
+                        for (const layer of renderLayers) {
+                            videoTracksHeight += (layer === 0) ? 86 : 71;
+                        }
+                        // Only add one spacer between video and audio sections
+                        const videoSectionHeight = headerHeight + videoTracksHeight + 6;
+
                         const layerIndex = isDragging.type === 'move' ? (isDragging.stickyLayer ?? clip.layer ?? 0) : (clip.layer || 0);
                         const visualIndex = layerIndex; // Audio tracks are sequential 0..N
 
-                        // 36 (Audio Track) + 6 (Spacer) = 42px per audio track
+                        // Audio track: 36px height + 6px spacer = 42px per track
                         const originalTop = videoSectionHeight + ((clip.layer || 0) * 42);
                         const ghostTop = originalTop + (isDragging.currentY || 0);
 
@@ -2856,18 +2941,27 @@ export default function TimelineEditor({
                                 )}
 
                                 {(() => {
+                                    // Calculate ghost position based on mouse movement
+                                    const ghostLeft = originalLeft + dragX;
+                                    const dragY = (isDragging.screenY || 0) - (isDragging.screenStartY || 0);
+                                    const ghostTopPos = originalTop + dragY;
+
+                                    // Create a modified clip with startTime=0 for ghost rendering
+                                    // This prevents double-calculation of left position
+                                    const ghostClip = { ...clip, startTime: 0, endTime: clip.endTime - clip.startTime };
+
                                     return (
                                         <div
                                             className="absolute z-[90] pointer-events-none"
                                             style={{
-                                                left: 40 + dragX,
-                                                top: ghostTop,
+                                                left: ghostLeft,
+                                                top: ghostTopPos,
                                                 width: clipWidth,
                                                 height: clipHeight,
                                             }}
                                         >
                                             <UnlinkedAudioClipItem
-                                                clip={clip}
+                                                clip={ghostClip}
                                                 pxPerSec={pxPerSec}
                                                 containerDuration={duration}
                                                 isSelected={false}
