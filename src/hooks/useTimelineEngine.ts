@@ -9,6 +9,7 @@ interface VideoClip {
     src?: string;
     layer?: number;
     hasAudio?: boolean;
+    volume?: number;
 }
 
 interface UseTimelineEngineProps {
@@ -72,6 +73,12 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
     // Track current active clip for time conversion
     const activeClipRef = useRef<VideoClip | null>(null);
 
+    // Track when seek is in progress to prevent timeUpdate conflicts
+    const isSeekingRef = useRef(false);
+
+    // Track scrubbing state with ref to avoid closure issues
+    const isScrubbingRef = useRef(false);
+
     // Find the active clip at a given timeline time
     const findActiveClip = useCallback((time: number): VideoClip | null => {
         return videoClips.find(clip =>
@@ -88,56 +95,131 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
         if (!video) return;
 
         const handleTimeUpdate = () => {
-            // Skip if scrubbing (timeline is master during scrub)
-            if (isScrubbing) return;
-
-            // Skip if not playing
-            if (!isPlaying) return;
-
             const videoTime = video.currentTime;
             const clip = activeClipRef.current;
+
+            // DEBUG: Log every timeupdate
+            console.log('[Engine] timeupdate fired. videoTime:', videoTime.toFixed(2),
+                'paused:', video.paused, 'scrubbing:', isScrubbingRef.current,
+                'clip:', clip?.id, 'clipEnd:', clip?.endTime?.toFixed(2));
+
+            // Skip if scrubbing (use ref for real-time value)
+            if (isScrubbingRef.current) return;
+
+            // Skip if seeking (prevent jitter during click-to-seek)
+            if (isSeekingRef.current) return;
 
             if (clip) {
                 // Convert video time to timeline time
                 const timelineTime = videoTimeToTimelineTime(videoTime, clip);
 
-                // Check if we've reached the end of this clip
-                if (timelineTime >= clip.endTime) {
-                    // Find next clip
-                    const nextClip = videoClips.find(c =>
-                        Math.abs(c.startTime - clip.endTime) < 0.1 &&
-                        (c.layer === 0 || c.layer === undefined)
-                    );
+                // Check if we've reached the end of this clip (check both source and timeline time)
+                // IMPORTANT: Check this BEFORE video.paused to handle natural video end
+                const pastClipEnd = timelineTime >= clip.endTime || videoTime >= clip.sourceEnd;
+
+                if (pastClipEnd) {
+                    console.log('[Engine] CLIP END DETECTED - pausing video. timelineTime:', timelineTime, 'clip.endTime:', clip.endTime);
+
+                    // FORCE STOP - pause immediately and mute
+                    video.pause();
+                    video.muted = true;
+                    video.volume = 0;
+
+                    // Find next clip that starts after this one (handle gaps)
+                    const nextClip = videoClips
+                        .filter(c => c.startTime >= clip.endTime && (c.layer === 0 || c.layer === undefined))
+                        .sort((a, b) => a.startTime - b.startTime)[0];
 
                     if (nextClip) {
-                        // Switch to next clip
-                        activeClipRef.current = nextClip;
-                        if (nextClip.src) {
-                            const currentSrc = video.currentSrc || video.src;
-                            if (!isSameSource(currentSrc, nextClip.src)) {
-                                video.src = getProxiedUrl(nextClip.src);
+                        // Check if there's a gap between clips
+                        const gapDuration = nextClip.startTime - clip.endTime;
+
+                        if (gapDuration > 0.1) {
+                            // There's a significant gap - need to ensure audio stops
+                            console.log('[Engine] Gap detected:', gapDuration, 'seconds. Pausing for gap.');
+
+                            // Keep video paused during gap
+                            // Video is already paused from earlier in this function
+
+                            // Set up the next clip
+                            activeClipRef.current = nextClip;
+
+                            // Jump timeline to next clip start immediately
+                            setCurrentTime(nextClip.startTime);
+                            onTimeUpdate(nextClip.startTime);
+
+                            // Use microtask to ensure audio truly stops before resuming
+                            setTimeout(() => {
+                                if (nextClip.src) {
+                                    const currentSrc = video.currentSrc || video.src;
+                                    if (!isSameSource(currentSrc, nextClip.src)) {
+                                        video.src = getProxiedUrl(nextClip.src);
+                                    }
+                                    video.currentTime = nextClip.sourceStart;
+                                    video.muted = shouldMuteVideo || (nextClip.hasAudio === false);
+                                    video.volume = 1;
+                                    video.play().catch(() => { });
+                                }
+                            }, 50); // Small delay to ensure clean audio cut
+                        } else {
+                            // No significant gap - seamless transition
+                            console.log('[Engine] Seamless transition to next clip at:', nextClip.startTime);
+                            activeClipRef.current = nextClip;
+                            if (nextClip.src) {
+                                const currentSrc = video.currentSrc || video.src;
+                                if (!isSameSource(currentSrc, nextClip.src)) {
+                                    video.src = getProxiedUrl(nextClip.src);
+                                }
+                                video.currentTime = nextClip.sourceStart;
+                                video.muted = shouldMuteVideo || (nextClip.hasAudio === false);
+                                video.volume = 1;
+                                video.play().catch(() => { });
                             }
-                            video.currentTime = nextClip.sourceStart;
-                            video.play().catch(() => { });
+                            setCurrentTime(nextClip.startTime);
+                            onTimeUpdate(nextClip.startTime);
                         }
-                        setCurrentTime(nextClip.startTime);
-                        onTimeUpdate(nextClip.startTime);
                     } else {
-                        // End of timeline
+                        // No more clips - end of timeline
+                        console.log('[Engine] No more clips - stopping playback');
                         setIsPlaying(false);
                         setCurrentTime(clip.endTime);
                         onTimeUpdate(clip.endTime);
                     }
                 } else {
-                    // Normal playback - update timeline position
-                    setCurrentTime(timelineTime);
-                    onTimeUpdate(timelineTime);
+                    // Normal playback - update timeline position (only if video is playing)
+                    if (!video.paused) {
+                        setCurrentTime(timelineTime);
+                        onTimeUpdate(timelineTime);
+                    }
                 }
             } else {
-                // No active clip - try to find one
-                const foundClip = findActiveClip(currentTime);
-                if (foundClip) {
-                    activeClipRef.current = foundClip;
+                // No active clip at current time - we're in a gap
+                // Immediately mute and pause to stop audio
+                video.muted = true;
+                video.pause();
+
+                // Find next clip to jump to
+                const nextClip = videoClips
+                    .filter(c => c.startTime > currentTime && (c.layer === 0 || c.layer === undefined))
+                    .sort((a, b) => a.startTime - b.startTime)[0];
+
+                if (nextClip) {
+                    // Jump to next clip
+                    activeClipRef.current = nextClip;
+                    if (nextClip.src) {
+                        const currentSrc = video.currentSrc || video.src;
+                        if (!isSameSource(currentSrc, nextClip.src)) {
+                            video.src = getProxiedUrl(nextClip.src);
+                        }
+                        video.currentTime = nextClip.sourceStart;
+                        video.muted = shouldMuteVideo || (nextClip.hasAudio === false);
+                        video.play().catch(() => { });
+                    }
+                    setCurrentTime(nextClip.startTime);
+                    onTimeUpdate(nextClip.startTime);
+                } else {
+                    // No more clips - stop playback
+                    setIsPlaying(false);
                 }
             }
         };
@@ -146,13 +228,22 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
         const handleEnded = () => {
             const clip = activeClipRef.current;
             if (clip) {
-                // Check for next clip
-                const nextClip = videoClips.find(c =>
-                    Math.abs(c.startTime - clip.endTime) < 0.1 &&
-                    (c.layer === 0 || c.layer === undefined)
-                );
+                // Check for next clip (handle gaps)
+                const nextClip = videoClips
+                    .filter(c => c.startTime >= clip.endTime && (c.layer === 0 || c.layer === undefined))
+                    .sort((a, b) => a.startTime - b.startTime)[0];
 
-                if (!nextClip) {
+                if (nextClip) {
+                    // Jump to next clip
+                    activeClipRef.current = nextClip;
+                    if (nextClip.src) {
+                        video.src = getProxiedUrl(nextClip.src);
+                        video.currentTime = nextClip.sourceStart;
+                        video.play().catch(() => { });
+                    }
+                    setCurrentTime(nextClip.startTime);
+                    onTimeUpdate(nextClip.startTime);
+                } else {
                     setIsPlaying(false);
                 }
             }
@@ -166,7 +257,7 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
             video.removeEventListener('timeupdate', handleTimeUpdate);
             video.removeEventListener('ended', handleEnded);
         };
-    }, [videoRef, isPlaying, isScrubbing, videoClips, currentTime, onTimeUpdate, findActiveClip]);
+    }, [videoRef, isScrubbing, videoClips, currentTime, onTimeUpdate, findActiveClip, shouldMuteVideo]);
 
     // =========================================================
     // Mute state and volume sync
@@ -197,6 +288,11 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
     // =========================================================
     const play = useCallback(() => {
         console.log('[Hybrid Engine] play() called, currentTime:', currentTime);
+
+        // CRITICAL: Reset scrubbing state when play is called
+        setIsScrubbing(false);
+        isScrubbingRef.current = false;
+
         const video = videoRef.current;
 
         // Use video's actual position if available AND we have an active clip, otherwise use state
@@ -237,11 +333,30 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
                     setIsPlaying(true);
                 });
         } else {
-            // No clip at current position - just set playing state
-            // Timeline will advance for V2+ or audio-only clips
-            setIsPlaying(true);
+            // No clip at current position - we're in a gap
+            // Find next clip and jump to it
+            const nextClip = videoClips
+                .filter(c => c.startTime > currentTime && (c.layer === 0 || c.layer === undefined))
+                .sort((a, b) => a.startTime - b.startTime)[0];
+
+            if (nextClip && video) {
+                activeClipRef.current = nextClip;
+                if (nextClip.src) {
+                    const currentSrc = video.currentSrc || video.src;
+                    if (!isSameSource(currentSrc, nextClip.src)) {
+                        video.src = getProxiedUrl(nextClip.src);
+                    }
+                    video.currentTime = nextClip.sourceStart;
+                    video.muted = shouldMuteVideo || (nextClip.hasAudio === false);
+                    video.play().catch(() => { });
+                }
+                setCurrentTime(nextClip.startTime);
+                onTimeUpdate(nextClip.startTime);
+                setIsPlaying(true);
+            }
+            // If no next clip, don't do anything (already at end)
         }
-    }, [videoRef, videoClips, currentTime, shouldMuteVideo, findActiveClip]);
+    }, [videoRef, videoClips, currentTime, shouldMuteVideo, findActiveClip, onTimeUpdate]);
 
     const pause = useCallback(() => {
         console.log('[Hybrid Engine] pause() called');
@@ -274,6 +389,7 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
         console.log('[Hybrid Engine] startScrub() - wasPlaying:', isPlaying);
         wasPlayingBeforeScrub.current = isPlaying;
         setIsScrubbing(true);
+        isScrubbingRef.current = true; // Sync ref for closure
 
         if (isPlaying) {
             videoRef.current?.pause();
@@ -284,6 +400,7 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
     const endScrub = useCallback(() => {
         console.log('[Hybrid Engine] endScrub() - resuming:', wasPlayingBeforeScrub.current);
         setIsScrubbing(false);
+        isScrubbingRef.current = false; // Sync ref for closure
 
         if (wasPlayingBeforeScrub.current) {
             // Small delay to ensure state is settled
@@ -302,6 +419,9 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
     // Seek (used during scrubbing and click-to-seek)
     // =========================================================
     const seek = useCallback((time: number) => {
+        // Set seeking flag to prevent timeUpdate conflicts
+        isSeekingRef.current = true;
+
         // Update timeline state immediately for responsive UI
         setCurrentTime(time);
         onTimeUpdate(time);
@@ -325,6 +445,11 @@ export function useTimelineEngine({ videoRef, videoClips, onTimeUpdate, duration
             const targetVideoTime = timelineTimeToVideoTime(time, clip);
             video.currentTime = targetVideoTime;
         }
+
+        // Reset seeking flag after a short delay to allow video to settle
+        setTimeout(() => {
+            isSeekingRef.current = false;
+        }, 50);
     }, [videoClips, onTimeUpdate, videoRef, findActiveClip, isScrubbing]);
 
     // =========================================================

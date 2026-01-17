@@ -105,6 +105,7 @@ export default function SubtitleMakerPage() {
         endTime: number;
         sourceStart: number;
         sourceEnd: number;
+        sourceDuration?: number; // Original full video duration (for trim limits)
         layer?: number; // 0 = Main, 1+ = Overlay
         assetId?: string; // ID of the video asset
         trackId?: number;
@@ -148,6 +149,7 @@ export default function SubtitleMakerPage() {
         // Enhanced fields for multi-track audio
         layer?: number;           // Audio track layer (A1=0, A2=1, etc.)
         src?: string;            // Audio source URL (same as video src)
+        name?: string;           // Filename for display
         isMuted?: boolean;       // Mute state
     }
     const [audioClips, setAudioClips] = useState<AudioClip[]>([]);
@@ -687,6 +689,7 @@ export default function SubtitleMakerPage() {
                     sourceEnd: clip.sourceEnd,
                     layer: clip.layer || 0,  // Same layer as video (A1 matches V1, etc.)
                     src: clip.src,
+                    name: clip.name, // Use video's filename for audio display
                     isMuted: false,
                 };
                 newAudioClips.push(audioClip);
@@ -702,8 +705,8 @@ export default function SubtitleMakerPage() {
             )
         );
 
-        // Add audio clips
-        updateAudioClipsWithHistory(prev => [...prev, ...newAudioClips]);
+        // Replace audio clips (clear old ones to avoid playing audio from previous videos)
+        updateAudioClipsWithHistory(newAudioClips);
         setIsAudioSeparated(true);
 
         console.log(`Separated audio from ${newAudioClips.length} clips`);
@@ -714,13 +717,14 @@ export default function SubtitleMakerPage() {
         // Remove audio clips
         updateAudioClipsWithHistory([]);
 
-        // Mark all video clips as audio linked
+        // Mark all video clips as having audio again (restore hasAudio and isAudioLinked)
         updateVideoClipsWithHistory(prev =>
-            prev.map(clip =>
-                clip.hasAudio
-                    ? { ...clip, isAudioLinked: true, audioClipId: undefined }
-                    : clip
-            )
+            prev.map(clip => ({
+                ...clip,
+                hasAudio: true, // Restore audio to video clip
+                isAudioLinked: true,
+                audioClipId: undefined
+            }))
         );
 
         setIsAudioSeparated(false);
@@ -759,9 +763,11 @@ export default function SubtitleMakerPage() {
                 endTime: duration,
                 sourceStart: 0,
                 sourceEnd: duration,
+                sourceDuration: duration, // Original full video length for trim limits
                 layer: 0,
                 assetId: 'main',
                 src: videoUrl,
+                name: videoFile?.name || 'Main Video', // Display filename on timeline
                 hasAudio: true,
                 isAudioLinked: true,  // Audio stays with video until explicitly separated
                 ratio: videoRatio || 16 / 9 // Store actual aspect ratio
@@ -799,6 +805,22 @@ export default function SubtitleMakerPage() {
         const max = Math.max(0, ...videoClips.map(c => c.layer || 0));
         return Array.from({ length: max + 1 }, (_, i) => i);
     }, [videoClips]);
+
+    // Auto-update timeline duration based on max endTime across ALL clips (not just V1)
+    useEffect(() => {
+        const maxVideoEnd = videoClips.length > 0
+            ? Math.max(...videoClips.map(c => c.endTime))
+            : 0;
+        const maxAudioEnd = audioClips.length > 0
+            ? Math.max(...audioClips.map(c => c.endTime))
+            : 0;
+        const newDuration = Math.max(maxVideoEnd, maxAudioEnd, duration);
+
+        // Only update if clips extend beyond current duration
+        if (newDuration > duration) {
+            setDuration(newDuration);
+        }
+    }, [videoClips, audioClips]);
 
     // Animation State
     const [animationStyle, setAnimationStyle] = useState('none');
@@ -1292,9 +1314,11 @@ export default function SubtitleMakerPage() {
                 endTime: time + newDuration,
                 sourceStart: 0,
                 sourceEnd: newDuration,
+                sourceDuration: newDuration, // Original full video length for trim limits
                 layer: newLayer,
                 assetId: assetId,
                 src: localUrl,
+                name: file.name, // Display filename on timeline
                 hasAudio: true,
                 isAudioLinked: true,
                 ratio: videoRatio // Store actual aspect ratio

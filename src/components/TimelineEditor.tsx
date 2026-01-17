@@ -16,8 +16,10 @@ export interface VideoClip {
     endTime: number;
     sourceStart: number;
     sourceEnd: number;
+    sourceDuration?: number; // Original full video duration (for trim limits)
     layer?: number; // 0 = Main, 1 = Overlay
     hasAudio?: boolean; // true by default, false when audio is unlinked
+    isAudioLinked?: boolean; // true when audio is inside video clip
     src?: string;
     name?: string;
     type?: string;
@@ -42,6 +44,7 @@ export interface AudioClip {
     waveform?: number[]; // Per-clip waveform data
     volume?: number; // Audio volume (0.0 to 2.0, default 1.0 = 100%)
     src?: string; // Audio source URL (usually same as video source)
+    name?: string; // Filename for display
     isMuted?: boolean; // Track-level mute
 }
 
@@ -224,6 +227,7 @@ export default function TimelineEditor({
     // ... (inside handleMouseMove)
 
     const [selectedAudioClipId, setSelectedAudioClipId] = useState<string | null>(null);
+
     const [frameThumbnails, setFrameThumbnails] = useState<string[]>([]);
     const [thumbnailAspectRatio, setThumbnailAspectRatio] = useState(16 / 9);
     const [isGeneratingFrames, setIsGeneratingFrames] = useState(false);
@@ -245,6 +249,9 @@ export default function TimelineEditor({
     // Using internal clips state for optimistic updates, synced with external
     const [videoClips, setVideoClips] = useState<VideoClip[]>(externalClips);
     const [localAudioClips, setLocalAudioClips] = useState<AudioClip[]>(audioClips);
+
+    // Clipboard for copy/paste (stores copied clip data)
+    const clipboardRef = useRef<{ type: 'video' | 'audio', clip: VideoClip | AudioClip } | null>(null);
 
     useEffect(() => {
         setVideoClips(externalClips);
@@ -359,12 +366,16 @@ export default function TimelineEditor({
     const [interactionMode, setInteractionMode] = useState<'none' | 'scrub' | 'select-candidate' | 'selecting'>('none');
     const interactionStartRef = useRef<{ x: number, y: number } | null>(null);
 
-    // Sync single selection to multi-selection (compatibility)
+    // Sync single selection to multi-selection (compatibility) - includes audio clips
     useEffect(() => {
-        if (selectedClipId) setSelectedClipIds(new Set([selectedClipId]));
-        else if (selectedClipIds.size === 1) { /* already synced or handled elsewhere */ }
-        else if (selectedClipIds.size === 0 && selectedClipId) setSelectedClipId(null);
-    }, [selectedClipId]);
+        if (selectedClipId) {
+            setSelectedClipIds(new Set([selectedClipId]));
+        } else if (selectedAudioClipId) {
+            setSelectedClipIds(new Set([selectedAudioClipId]));
+        } else if (selectedClipIds.size === 0) {
+            // No selection
+        }
+    }, [selectedClipId, selectedAudioClipId]);
 
     // Derived single ID for backward compatibility properties (like property panel)
     // If multiple selected, maybe we just show the first one or null
@@ -572,7 +583,8 @@ export default function TimelineEditor({
             });
         }
 
-        return extractedFrames;
+        // Return both frames AND ratio for synchronous use (avoids state timing issues)
+        return { frames: extractedFrames, ratio: videoRatio };
     }, []);
 
     // Effect to trigger extraction for clips that don't have frames yet
@@ -595,9 +607,10 @@ export default function TimelineEditor({
                     onFrameExtractionChange?.(true);
 
                     try {
-                        const frames = await extractFramesForClip(clip);
-                        if (frames && frames.length > 0) {
-                            updatedClips[i] = { ...clip, frames };
+                        const result = await extractFramesForClip(clip);
+                        if (result && result.frames.length > 0) {
+                            // Use ratio directly from extraction (synchronous, not from state)
+                            updatedClips[i] = { ...clip, frames: result.frames, ratio: result.ratio };
                             madeChanges = true;
                         }
                     } catch (e) {
@@ -1016,7 +1029,8 @@ export default function TimelineEditor({
                 // Calculate target layer from mouse Y position with STICKY THRESHOLD (CapCut style)
                 const mouseY = e.clientY - containerRect.top + containerRef.current.scrollTop;
                 const headerHeight = 24 + 64 + 6; // Ruler + CC row + spacer
-                const trackHeight = 70;
+                // Use average height for layer switch calculation (V1=86, others=71)
+                const avgTrackHeight = renderLayers.length === 1 ? 86 : 75;
 
                 // Get original layer from clip'
                 originalLayer = drag.originalLayer !== undefined ? drag.originalLayer : (clip?.layer ?? 0);
@@ -1024,7 +1038,7 @@ export default function TimelineEditor({
 
                 // CAPCUT STICKY BEHAVIOR
                 const STICKY_THRESHOLD = 20;
-                const trackSwitches = Math.floor((rawDeltaY + (rawDeltaY > 0 ? STICKY_THRESHOLD : -STICKY_THRESHOLD)) / trackHeight);
+                const trackSwitches = Math.floor((rawDeltaY + (rawDeltaY > 0 ? STICKY_THRESHOLD : -STICKY_THRESHOLD)) / avgTrackHeight);
 
                 if (trackSwitches !== 0) {
                     const originalVisualIndex = renderLayers.indexOf(originalLayer);
@@ -1036,10 +1050,15 @@ export default function TimelineEditor({
                     stickyLayer = originalLayer;
                 }
 
-                // Calculate visualOffsetY
+                // Calculate visualOffsetY using actual heights
                 const originalVisualIndex = renderLayers.indexOf(originalLayer);
                 const currentStickyVisualIndex = renderLayers.indexOf(stickyLayer);
-                visualOffsetY = (currentStickyVisualIndex - originalVisualIndex) * trackHeight;
+                // V1 is 86px (80+6), others are 58px (52+6)
+                let offsetY = 0;
+                for (let i = Math.min(originalVisualIndex, currentStickyVisualIndex); i < Math.max(originalVisualIndex, currentStickyVisualIndex); i++) {
+                    offsetY += (renderLayers[i] === 0) ? 86 : 71;
+                }
+                visualOffsetY = (currentStickyVisualIndex >= originalVisualIndex) ? offsetY : -offsetY;
 
                 setDropIndicator({ time: newStart, layer: stickyLayer, gapIndex: -1, gapSize: clipDuration });
             } else if (drag.target === 'audio') {
@@ -1160,7 +1179,22 @@ export default function TimelineEditor({
                 // Calculate new source end
                 const endShift = newEnd - drag.originalEnd;
                 const currentSourceEnd = clip.sourceEnd ?? (clip.endTime - clip.startTime);
-                const newSourceEnd = Math.max(clip.sourceStart ?? 0, currentSourceEnd + endShift);
+                let newSourceEnd = Math.max(clip.sourceStart ?? 0, currentSourceEnd + endShift);
+
+                // Clamp to original source duration ONLY if explicitly set
+                // This prevents extending beyond original video length for new clips
+                if (clip.sourceDuration !== undefined) {
+                    newSourceEnd = Math.min(newSourceEnd, clip.sourceDuration);
+                    // Also clamp newEnd based on source limit
+                    const maxExtension = clip.sourceDuration - currentSourceEnd;
+                    if (maxExtension <= 0) {
+                        // Clip is already at max, don't allow extending
+                        newEnd = drag.originalEnd;
+                        newSourceEnd = currentSourceEnd;
+                    } else {
+                        newEnd = Math.min(newEnd, drag.originalEnd + maxExtension);
+                    }
+                }
 
                 // Reset DOM styles before React update (let React take over)
                 if (trimActiveElementRef.current) {
@@ -1207,13 +1241,13 @@ export default function TimelineEditor({
                 const containerRect = containerRef.current.getBoundingClientRect();
                 const mouseY = e.clientY - containerRect.top + containerRef.current.scrollTop;
                 const headerHeight = 24 + 64 + 6; // Ruler + CC row + spacer
-                const trackHeight = 70;
+                // Track heights: V1=86 (80+6), others=58 (52+6)
                 const trackAreaY = mouseY - headerHeight;
 
                 // Find max layer in current clips
                 const maxLayer = Math.max(0, ...videoClips.map(c => c.layer || 0));
 
-                // Calculate which track the mouse is over
+                // Calculate which track the mouse is over using variable heights
                 // renderLayers is REVERSED: [maxLayer, maxLayer-1, ..., 1, 0]
                 // So visualIndex 0 = maxLayer (top), last index = 0 (V1, bottom)
 
@@ -1227,19 +1261,30 @@ export default function TimelineEditor({
                     }
                     // If just clicked (no significant movement), keep original layer
                 } else {
-                    const visualIndex = Math.floor(trackAreaY / trackHeight);
+                    // Find which track the Y falls into using variable heights
+                    let cumulativeY = 0;
+                    let visualIndex = -1;
+                    for (let i = 0; i < renderLayers.length; i++) {
+                        const thisTrackHeight = (renderLayers[i] === 0) ? 86 : 71;
+                        if (trackAreaY < cumulativeY + thisTrackHeight) {
+                            visualIndex = i;
+                            break;
+                        }
+                        cumulativeY += thisTrackHeight;
+                    }
 
-                    if (visualIndex < renderLayers.length) {
+                    if (visualIndex >= 0 && visualIndex < renderLayers.length) {
                         // Mouse is over an existing track
                         targetLayer = renderLayers[visualIndex];
+                        const thisTrackHeight = (targetLayer === 0) ? 86 : 71;
+                        const positionInTrack = trackAreaY - cumulativeY + thisTrackHeight;
 
                         // Check if this is the top track and mouse is in the upper half
                         // Only create new layer if user actually dragged upward significantly
                         if (visualIndex === 0) {
-                            const positionInTrack = trackAreaY % trackHeight;
                             const draggedUpward = drag.screenStartY !== undefined &&
                                 (drag.screenStartY - e.clientY) > 20;
-                            if (positionInTrack < trackHeight / 2 && draggedUpward) {
+                            if (positionInTrack < thisTrackHeight / 2 && draggedUpward) {
                                 // Upper half of top track AND actually dragged - create new layer
                                 targetLayer = maxLayer + 1;
                             }
@@ -1445,11 +1490,12 @@ export default function TimelineEditor({
 
                 // Check Video Clips - Updated for new layout
                 // X offset: 40px for sticky header column
-                // Y: Ruler 24px + CC row 74px + video tracks 74px each
+                // Y: Ruler 24px + CC row 74px + video tracks (variable height)
                 const newSelection = new Set<string>();
                 const headerColumnOffset = 40;
                 const headerHeight = 24 + 64 + 6; // Ruler + CC row with spacer
-                const trackHeight = 70; // Video track height (h-16) + spacer (h-1.5)
+                const mainTrackHeight = 80 + 6; // V1 main track (80px) + spacer
+                const slaveTrackHeight = 65 + 6; // V2+ slave tracks (65px) + spacer
 
                 videoClips.forEach(clip => {
                     const clipX1 = headerColumnOffset + clip.startTime * pxPerSec;
@@ -1458,11 +1504,37 @@ export default function TimelineEditor({
                     const visualIndex = renderLayers.indexOf(clip.layer || 0);
                     if (visualIndex === -1) return;
 
-                    const clipY1 = headerHeight + (visualIndex * trackHeight);
-                    const clipY2 = clipY1 + 64; // Actual track content height (h-16)
+                    // Calculate Y position based on variable track heights
+                    let clipY1 = headerHeight;
+                    for (let i = 0; i < visualIndex; i++) {
+                        clipY1 += (renderLayers[i] === 0) ? mainTrackHeight : slaveTrackHeight;
+                    }
+                    const currentTrackHeight = (clip.layer || 0) === 0 ? 80 : 65; // Content height (without spacer)
+                    const clipY2 = clipY1 + currentTrackHeight;
 
                     const overlapsX = clipX1 < boxRight && clipX2 > boxLeft;
                     const overlapsY = clipY1 < boxBottom && clipY2 > boxTop;
+
+                    if (overlapsX && overlapsY) {
+                        newSelection.add(clip.id);
+                    }
+                });
+
+                // Check Audio Clips - calculate based on audio track position
+                // Audio track is after all video tracks
+                let totalVideoTracksHeight = 0;
+                renderLayers.forEach(layer => {
+                    totalVideoTracksHeight += (layer === 0) ? mainTrackHeight : slaveTrackHeight;
+                });
+                const audioTrackY1 = headerHeight + totalVideoTracksHeight;
+                const audioTrackY2 = audioTrackY1 + 36; // Audio track height (h-9 = 36px)
+
+                localAudioClips.forEach(clip => {
+                    const clipX1 = headerColumnOffset + clip.startTime * pxPerSec;
+                    const clipX2 = headerColumnOffset + clip.endTime * pxPerSec;
+
+                    const overlapsX = clipX1 < boxRight && clipX2 > boxLeft;
+                    const overlapsY = audioTrackY1 < boxBottom && audioTrackY2 > boxTop;
 
                     if (overlapsX && overlapsY) {
                         newSelection.add(clip.id);
@@ -1487,7 +1559,7 @@ export default function TimelineEditor({
                 onSeek(time);
             }
         }
-    }, [interactionMode, isScrubbing, isDragging, pxPerSec, duration, onSeek, renderLayers, videoClips, selectionBox, containerRef, interactionStartRef, setSelectedClipIds]);
+    }, [interactionMode, isScrubbing, isDragging, pxPerSec, duration, onSeek, renderLayers, videoClips, localAudioClips, selectionBox, containerRef, interactionStartRef, setSelectedClipIds]);
 
     // Handle Mouse Up (Global)
     const handleGlobalMouseUp = useCallback((e: MouseEvent) => {
@@ -1506,10 +1578,9 @@ export default function TimelineEditor({
             setSelectedAudioClipId(null);
         }
 
-        if (interactionMode === 'selecting' || interactionMode === 'select-candidate') {
-            setInteractionMode('none');
-            setSelectionBox(null);
-        }
+        // Always clear selection box and interaction mode
+        setInteractionMode('none');
+        setSelectionBox(null);
 
         if (isScrubbing) {
             setIsScrubbing(false);
@@ -1574,8 +1645,17 @@ export default function TimelineEditor({
             if (clip && time > clip.startTime && time < clip.endTime) {
                 const ratio = (time - clip.startTime) / (clip.endTime - clip.startTime);
                 const sourceSplit = clip.sourceStart + (clip.sourceEnd - clip.sourceStart) * ratio;
-                const clip1 = { ...clip, id: `${clip.id}-1`, endTime: time, sourceEnd: sourceSplit };
-                const clip2 = { ...clip, id: `${clip.id}-2`, startTime: time, sourceStart: sourceSplit };
+
+                // Slice existing frames proportionally for immediate visual feedback
+                // New frames will be extracted later and replace these
+                const existingFrames = clip.frames || [];
+                const splitIndex = Math.floor(existingFrames.length * ratio);
+                const frames1 = existingFrames.slice(0, splitIndex);
+                const frames2 = existingFrames.slice(splitIndex);
+
+                // Clear waveform so they regenerate for new source ranges
+                const clip1 = { ...clip, id: `${clip.id}-1`, endTime: time, sourceEnd: sourceSplit, frames: frames1.length > 0 ? frames1 : undefined, waveform: undefined };
+                const clip2 = { ...clip, id: `${clip.id}-2`, startTime: time, sourceStart: sourceSplit, frames: frames2.length > 0 ? frames2 : undefined, waveform: undefined };
                 const newClips = videoClips.filter(c => c.id !== clipId).concat([clip1, clip2]).sort((a, b) => a.startTime - b.startTime);
                 setVideoClips(newClips);
                 onUpdateVideoClips(newClips);
@@ -1587,8 +1667,9 @@ export default function TimelineEditor({
             if (audioClip && time > audioClip.startTime && time < audioClip.endTime) {
                 const ratio = (time - audioClip.startTime) / (audioClip.endTime - audioClip.startTime); // Fixed: audioClip.endTime - audioClip.startTime
                 const sourceSplit = audioClip.sourceStart + (audioClip.sourceEnd - audioClip.sourceStart) * ratio;
-                const audio1: AudioClip = { ...audioClip, id: `${audioClip.id}-1`, endTime: time, sourceEnd: sourceSplit };
-                const audio2: AudioClip = { ...audioClip, id: `${audioClip.id}-2`, startTime: time, sourceStart: sourceSplit };
+                // Clear waveform so it regenerates for the new source range
+                const audio1: AudioClip = { ...audioClip, id: `${audioClip.id}-1`, endTime: time, sourceEnd: sourceSplit, waveform: undefined };
+                const audio2: AudioClip = { ...audioClip, id: `${audioClip.id}-2`, startTime: time, sourceStart: sourceSplit, waveform: undefined };
                 const newAudioClips = localAudioClips.filter(a => a.id !== clipId).concat([audio1, audio2]).sort((a, b) => a.startTime - b.startTime);
                 setLocalAudioClips(newAudioClips);
                 onUpdateAudioClips(newAudioClips);
@@ -1962,6 +2043,22 @@ export default function TimelineEditor({
             const key = e.key.toLowerCase();
 
             if (e.key === 'Delete' || e.key === 'Backspace') {
+                // Multi-select delete: delete all selected clips at once
+                if (selectedClipIds.size > 0) {
+                    const idsToDelete = new Set(selectedClipIds);
+                    const updatedClips = videoClips.filter(c => !idsToDelete.has(c.id));
+                    const updatedAudioClips = localAudioClips.filter(c => !idsToDelete.has(c.id));
+
+                    onUpdateVideoClips(updatedClips);
+                    onUpdateAudioClips(updatedAudioClips);
+                    setSelectedClipIds(new Set());
+                    setSelectedClipId(null);
+                    setSelectedAudioClipId(null);
+                    console.log('[Delete] Deleted', idsToDelete.size, 'clips');
+                    return;
+                }
+
+                // Single-select delete (fallback)
                 if (selectedClipId) {
                     const deletedClip = videoClips.find(c => c.id === selectedClipId);
                     if (deletedClip) {
@@ -2019,11 +2116,92 @@ export default function TimelineEditor({
             } else if (key === 'w') {
                 handleRippleTrimRight();
             }
+
+            // Ctrl+C: Copy selected clip
+            if ((e.ctrlKey || e.metaKey) && key === 'c') {
+                e.preventDefault();
+                if (selectedClipId) {
+                    const clip = videoClips.find(c => c.id === selectedClipId);
+                    if (clip) {
+                        clipboardRef.current = { type: 'video', clip: { ...clip } };
+                        console.log('[Clipboard] Copied video clip:', clip.id);
+                    }
+                } else if (selectedAudioClipId) {
+                    const clip = localAudioClips.find(c => c.id === selectedAudioClipId);
+                    if (clip) {
+                        clipboardRef.current = { type: 'audio', clip: { ...clip } };
+                        console.log('[Clipboard] Copied audio clip:', clip.id);
+                    }
+                }
+            }
+
+            // Ctrl+V: Paste at current playhead position
+            if ((e.ctrlKey || e.metaKey) && key === 'v') {
+                e.preventDefault();
+                if (clipboardRef.current) {
+                    const { type, clip } = clipboardRef.current;
+                    const pasteTime = externalCurrentTime ?? 0;
+                    const clipDuration = clip.endTime - clip.startTime;
+                    const newId = `${clip.id}-copy-${Date.now()}`;
+
+                    if (type === 'video') {
+                        const videoClip = clip as VideoClip;
+                        const originalLayer = videoClip.layer ?? 0;
+
+                        // CapCut style: V1 (layer 0) clips paste to V2 (layer 1)
+                        // Other layers paste at same layer, but avoid overlaps
+                        let targetLayer = originalLayer === 0 ? 1 : originalLayer;
+
+                        // Find a layer without overlap
+                        const clipStart = pasteTime;
+                        const clipEnd = pasteTime + clipDuration;
+
+                        const hasOverlap = (layer: number) => {
+                            return videoClips.some(c =>
+                                (c.layer ?? 0) === layer &&
+                                c.startTime < clipEnd &&
+                                c.endTime > clipStart
+                            );
+                        };
+
+                        // Keep incrementing layer until we find one without overlap
+                        while (hasOverlap(targetLayer)) {
+                            targetLayer++;
+                        }
+
+                        const newClip: VideoClip = {
+                            ...videoClip,
+                            id: newId,
+                            startTime: pasteTime,
+                            endTime: pasteTime + clipDuration,
+                            layer: targetLayer,
+                        };
+                        const updatedClips = [...videoClips, newClip];
+                        setVideoClips(updatedClips);
+                        onUpdateVideoClips(updatedClips);
+                        setSelectedClipId(newId);
+                        console.log('[Clipboard] Pasted video clip at:', pasteTime, 'layer:', targetLayer);
+                    } else if (type === 'audio') {
+                        const audioClip = clip as AudioClip;
+                        const newClip: AudioClip = {
+                            ...audioClip,
+                            id: newId,
+                            startTime: pasteTime,
+                            endTime: pasteTime + clipDuration,
+                        };
+                        const updatedClips = [...localAudioClips, newClip];
+                        setLocalAudioClips(updatedClips);
+                        onUpdateAudioClips(updatedClips);
+                        setSelectedAudioClipId(newId);
+                        console.log('[Clipboard] Pasted audio clip at:', pasteTime);
+                    }
+                }
+            }
         };
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [selectedClipId, selectedAudioClipId, selectedSubtitleId, videoClips, localAudioClips, onUpdateVideoClips, onUpdateAudioClips, onDeleteSubtitle, handleSplit, handleRippleTrimLeft, handleRippleTrimRight, setLocalAudioClips, setSelectedClipId, setSelectedAudioClipId, setSelectedSubtitleId]); // Fixed dep
+    }, [selectedClipId, selectedAudioClipId, selectedSubtitleId, videoClips, localAudioClips, onUpdateVideoClips, onUpdateAudioClips, onDeleteSubtitle, handleSplit, handleRippleTrimLeft, handleRippleTrimRight, setLocalAudioClips, setSelectedClipId, setSelectedAudioClipId, setSelectedSubtitleId, externalCurrentTime]); // Fixed dep
 
     // Merge Audio Function
     const handleMergeAudio = useCallback(() => {
@@ -2032,24 +2210,28 @@ export default function TimelineEditor({
         if (selectedClipId) activeSelection.add(selectedClipId);
         if (selectedAudioClipId) activeSelection.add(selectedAudioClipId);
 
-        // Separate into videos and audios
-        const videosToMerge = videoClips.filter(c => activeSelection.has(c.id));
+        // Get selected audio clips
         const audiosToMerge = localAudioClips.filter(c => activeSelection.has(c.id));
 
-        if (videosToMerge.length === 0 || audiosToMerge.length === 0) return;
+        if (audiosToMerge.length === 0) return;
 
         const updatedVideos = [...videoClips];
         const updatedAudios = [...localAudioClips];
 
-        // 1. Enable audio on selected videos
-        videosToMerge.forEach(v => {
-            const index = updatedVideos.findIndex(c => c.id === v.id);
-            if (index !== -1) {
-                updatedVideos[index] = { ...updatedVideos[index], hasAudio: true };
+        // For each audio clip, restore hasAudio on its original video clip
+        audiosToMerge.forEach(audio => {
+            // Find the original video by videoClipId
+            const videoIndex = updatedVideos.findIndex(v => v.id === audio.videoClipId);
+            if (videoIndex !== -1) {
+                updatedVideos[videoIndex] = {
+                    ...updatedVideos[videoIndex],
+                    hasAudio: true,
+                    isAudioLinked: true
+                };
             }
         });
 
-        // 2. Remove selected audio clips
+        // Remove merged audio clips
         const audioIdsToRemove = new Set(audiosToMerge.map(a => a.id));
         const finalAudios = updatedAudios.filter(a => !audioIdsToRemove.has(a.id));
 
@@ -2255,104 +2437,116 @@ export default function TimelineEditor({
                     </div>
 
                     {/* Dynamic Video Layers */}
-                    {renderLayers.map(layerIndex => (
-                        <React.Fragment key={layerIndex}>
-                            {/* Video Track Row - overflow-visible for smooth vertical drag */}
-                            <div className="flex overflow-visible">
-                                {/* Track Header - sticky left */}
-                                <div className={`w-10 h-16 flex items-center justify-center border-b border-r border-gray-200 sticky left-0 z-10 flex-shrink-0 ${layerIndex === 0 ? 'bg-gray-100' : 'bg-gray-50'}`}>
-                                    <span className="text-[10px] text-gray-600 font-bold">V{layerIndex + 1}</span>
-                                </div>
-                                {/* Track Content - overflow-visible allows clips to extend during drag */}
-                                <div className="relative h-16 border-b border-gray-200 dark:border-zinc-800 flex-shrink-0 overflow-visible" style={{ width: totalWidth }}>
-                                    <div className={`absolute inset-0 ${layerIndex === 0 ? 'bg-zinc-200 dark:bg-zinc-900' : 'bg-zinc-100 dark:bg-zinc-950/50'}`} />
+                    {renderLayers.map(layerIndex => {
+                        // V1 main track is taller (CapCut style)
+                        const isMainTrack = layerIndex === 0;
+                        const trackHeight = isMainTrack ? 80 : 65; // V1=80px, V2+=65px
 
-                                    {/* Hint for new track */}
-                                    {videoClips.filter(c => (c.layer || 0) === layerIndex).length === 0 && layerIndex > 0 && (
-                                        <div className="absolute inset-0 flex items-center justify-center opacity-10 pointer-events-none">
-                                            <span className="text-xs text-black dark:text-white">Track V{layerIndex + 1}</span>
-                                        </div>
-                                    )}
-                                    {(() => {
-                                        const layerClips = videoClips
-                                            .filter(c => (c.layer || 0) === layerIndex)
-                                            .sort((a, b) => a.startTime - b.startTime);
+                        return (
+                            <React.Fragment key={layerIndex}>
+                                {/* Video Track Row - overflow-visible for smooth vertical drag */}
+                                <div className="flex overflow-visible">
+                                    {/* Track Header - sticky left */}
+                                    <div
+                                        className={`w-10 flex items-center justify-center border-b border-r border-gray-200 sticky left-0 z-10 flex-shrink-0 ${isMainTrack ? 'bg-gray-100' : 'bg-gray-50'}`}
+                                        style={{ height: trackHeight }}
+                                    >
+                                        <span className="text-[10px] text-gray-600 font-bold">V{layerIndex + 1}</span>
+                                    </div>
+                                    {/* Track Content - overflow-visible allows clips to extend during drag */}
+                                    <div
+                                        className={`relative border-b border-gray-200 dark:border-zinc-800 flex-shrink-0 overflow-visible`}
+                                        style={{ width: totalWidth, height: trackHeight }}
+                                    >
+                                        <div className={`absolute inset-0 ${isMainTrack ? 'bg-zinc-200 dark:bg-zinc-900' : 'bg-zinc-100 dark:bg-zinc-950/50'}`} />
 
-                                        const showGap = dropIndicator && dropIndicator.layer === layerIndex && dropIndicator.gapIndex !== undefined && dropIndicator.gapIndex >= 0 && dropIndicator.gapSize !== undefined;
+                                        {/* Hint for new track */}
+                                        {videoClips.filter(c => (c.layer || 0) === layerIndex).length === 0 && layerIndex > 0 && (
+                                            <div className="absolute inset-0 flex items-center justify-center opacity-10 pointer-events-none">
+                                                <span className="text-xs text-black dark:text-white">Track V{layerIndex + 1}</span>
+                                            </div>
+                                        )}
+                                        {(() => {
+                                            const layerClips = videoClips
+                                                .filter(c => (c.layer || 0) === layerIndex)
+                                                .sort((a, b) => a.startTime - b.startTime);
 
-                                        return layerClips.map((clip, index) => {
-                                            const isShifted = showGap && index >= (dropIndicator.gapIndex!);
-                                            const shiftAmount = isShifted ? (dropIndicator.gapSize! * pxPerSec) : 0;
+                                            const showGap = dropIndicator && dropIndicator.layer === layerIndex && dropIndicator.gapIndex !== undefined && dropIndicator.gapIndex >= 0 && dropIndicator.gapSize !== undefined;
 
-                                            return (
-                                                <React.Fragment key={clip.id}>
-                                                    {/* Magnet Gap Placeholder removed - using global CapCut-style placeholder */}
+                                            return layerClips.map((clip, index) => {
+                                                const isShifted = showGap && index >= (dropIndicator.gapIndex!);
+                                                const shiftAmount = isShifted ? (dropIndicator.gapSize! * pxPerSec) : 0;
 
-                                                    <div
-                                                        className="absolute inset-0 pointer-events-none"
-                                                        style={{ transform: `translateX(${shiftAmount}px)` }}
-                                                    >
+                                                return (
+                                                    <React.Fragment key={clip.id}>
+                                                        {/* Magnet Gap Placeholder removed - using global CapCut-style placeholder */}
+
                                                         <div
-                                                            className="pointer-events-auto video-clip-wrapper"
-                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                            className="absolute inset-0 pointer-events-none"
+                                                            style={{ transform: `translateX(${shiftAmount}px)` }}
                                                         >
-                                                            <VideoClipItem
-                                                                clip={clip}
-                                                                layerIndex={layerIndex}
-                                                                pxPerSec={pxPerSec}
-                                                                containerDuration={duration}
-                                                                isSelected={selectedClipIds.has(clip.id)}
-                                                                isCutMode={isCutMode}
-                                                                frameThumbnails={frameThumbnails}
-                                                                thumbnailAspectRatio={thumbnailAspectRatio}
-                                                                containerRef={containerRef}
-                                                                handleUnlinkAudio={handleUnlinkAudio}
-                                                                contextMenu={contextMenu}
-                                                                splitClip={splitClip}
-                                                                onMouseDown={handleVideoClipMouseDown}
-                                                                onContextMenu={handleVideoClipContextMenu}
-                                                                onDragHandle={handleVideoClipDragHandle}
-                                                                isDragging={isDragging?.id === clip.id && isDragging?.type === 'move'}
-                                                                hasMoved={isDragging?.id === clip.id && isDragging?.type === 'move' && !!(
-                                                                    isDragging?.screenX && isDragging?.screenStartX &&
-                                                                    (Math.abs(isDragging.screenX - isDragging.screenStartX) > 5 ||
-                                                                        Math.abs((isDragging?.screenY || 0) - (isDragging?.screenStartY || 0)) > 5)
-                                                                )}
-                                                                dragOffsetX={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentX || 0) * pxPerSec : 0}
-                                                                dragOffsetY={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentY || 0) : 0}
-                                                                trimLeftOffset={isDragging?.id === clip.id && isDragging?.type === 'left' ? (isDragging?.currentX || 0) * pxPerSec : 0}
-                                                                trimRightOffset={isDragging?.id === clip.id && isDragging?.type === 'right' ? (isDragging?.currentX || 0) * pxPerSec : 0}
-                                                                audioWaveformL={audioWaveformL}
-                                                                onVolumeChange={handleVolumeChange}
-                                                            />
+                                                            <div
+                                                                className="pointer-events-auto video-clip-wrapper"
+                                                                onMouseDown={(e) => e.stopPropagation()}
+                                                            >
+                                                                <VideoClipItem
+                                                                    clip={clip}
+                                                                    layerIndex={layerIndex}
+                                                                    pxPerSec={pxPerSec}
+                                                                    containerDuration={duration}
+                                                                    isSelected={selectedClipIds.has(clip.id)}
+                                                                    isCutMode={isCutMode}
+                                                                    frameThumbnails={frameThumbnails}
+                                                                    thumbnailAspectRatio={thumbnailAspectRatio}
+                                                                    containerRef={containerRef}
+                                                                    handleUnlinkAudio={handleUnlinkAudio}
+                                                                    contextMenu={contextMenu}
+                                                                    splitClip={splitClip}
+                                                                    onMouseDown={handleVideoClipMouseDown}
+                                                                    onContextMenu={handleVideoClipContextMenu}
+                                                                    onDragHandle={handleVideoClipDragHandle}
+                                                                    isDragging={isDragging?.id === clip.id && isDragging?.type === 'move'}
+                                                                    hasMoved={isDragging?.id === clip.id && isDragging?.type === 'move' && !!(
+                                                                        isDragging?.screenX && isDragging?.screenStartX &&
+                                                                        (Math.abs(isDragging.screenX - isDragging.screenStartX) > 5 ||
+                                                                            Math.abs((isDragging?.screenY || 0) - (isDragging?.screenStartY || 0)) > 5)
+                                                                    )}
+                                                                    dragOffsetX={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentX || 0) * pxPerSec : 0}
+                                                                    dragOffsetY={isDragging?.id === clip.id && isDragging?.type === 'move' ? (isDragging?.currentY || 0) : 0}
+                                                                    trimLeftOffset={isDragging?.id === clip.id && isDragging?.type === 'left' ? (isDragging?.currentX || 0) * pxPerSec : 0}
+                                                                    trimRightOffset={isDragging?.id === clip.id && isDragging?.type === 'right' ? (isDragging?.currentX || 0) * pxPerSec : 0}
+                                                                    audioWaveformL={audioWaveformL}
+                                                                    onVolumeChange={handleVolumeChange}
+                                                                />
+                                                            </div>
                                                         </div>
-                                                    </div>
-                                                </React.Fragment>
+                                                    </React.Fragment>
+                                                );
+                                            }).concat(
+                                                (showGap && dropIndicator.gapIndex === layerClips.length) ? [(
+                                                    <div
+                                                        key="ghost-end"
+                                                        className="absolute h-12 top-1 border-2 border-dashed border-indigo-400/50 bg-indigo-500/10 rounded-lg"
+                                                        style={{
+                                                            left: (layerClips.length > 0 ? layerClips[layerClips.length - 1].endTime : 0) * pxPerSec,
+                                                            width: dropIndicator.gapSize! * pxPerSec,
+                                                            zIndex: 0
+                                                        }}
+                                                    />
+                                                )] : []
                                             );
-                                        }).concat(
-                                            (showGap && dropIndicator.gapIndex === layerClips.length) ? [(
-                                                <div
-                                                    key="ghost-end"
-                                                    className="absolute h-12 top-1 border-2 border-dashed border-indigo-400/50 bg-indigo-500/10 rounded-lg"
-                                                    style={{
-                                                        left: (layerClips.length > 0 ? layerClips[layerClips.length - 1].endTime : 0) * pxPerSec,
-                                                        width: dropIndicator.gapSize! * pxPerSec,
-                                                        zIndex: 0
-                                                    }}
-                                                />
-                                            )] : []
-                                        );
-                                        // ghost-free placeholder removed - using global CapCut-style placeholder instead
-                                    })()}
+                                            // ghost-free placeholder removed - using global CapCut-style placeholder instead
+                                        })()}
+                                    </div>
                                 </div>
-                            </div>
-                            {/* Spacer between video tracks */}
-                            <div className="flex">
-                                <div className="w-10 h-1.5 bg-white sticky left-0 z-10 flex-shrink-0" />
-                                <div className="h-1.5 bg-white flex-shrink-0" style={{ width: totalWidth }} />
-                            </div>
-                        </React.Fragment>
-                    ))}
+                                {/* Spacer between video tracks */}
+                                <div className="flex">
+                                    <div className="w-10 h-1.5 bg-white sticky left-0 z-10 flex-shrink-0" />
+                                    <div className="h-1.5 bg-white flex-shrink-0" style={{ width: totalWidth }} />
+                                </div>
+                            </React.Fragment>
+                        );
+                    })}
 
                     {/* Audio Tracks - Dynamic layers (A1, A2, A3...) */}
                     {(() => {
@@ -2385,7 +2579,7 @@ export default function TimelineEditor({
                                             <span className="text-[10px] text-sky-600 font-bold">A{audioLayer + 1}</span>
                                         </div>
                                         {/* Track Content */}
-                                        <div className="relative h-9 border-b border-gray-200 flex-shrink-0" style={{ width: totalWidth }}>
+                                        <div className="relative h-9 border-b border-gray-200 flex-shrink-0 overflow-hidden" style={{ width: totalWidth }}>
                                             <div className="absolute inset-0 bg-sky-50" />
 
                                             {audioLayerClips.map((audioClip, index) => {

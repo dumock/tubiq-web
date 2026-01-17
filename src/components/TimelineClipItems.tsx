@@ -66,9 +66,11 @@ export const VideoClipItem = memo(({
     const volume = localVolume; // Use local volume for instant feedback
 
     // Dynamic slot width based on actual video aspect ratio
-    // Track height: 44px for video frames, 20px for audio waveform = 64px total (h-16)
-    const videoHeight = 44;
-    const audioHeight = 20;
+    // V1 main track: 80px total (56px video + 24px audio)
+    // V2+ slave tracks: 65px total (45px video + 20px audio)
+    const isMainTrack = layerIndex === 0;
+    const videoHeight = isMainTrack ? 56 : 45;
+    const audioHeight = isMainTrack ? 24 : 20;
     // Use clip's ratio if available, otherwise use passed thumbnailAspectRatio, or default to 16:9
     const aspectRatio = clip.ratio || thumbnailAspectRatio || (16 / 9);
 
@@ -134,7 +136,7 @@ export const VideoClipItem = memo(({
             className={`video-clip absolute inset-y-0 rounded-lg overflow-hidden cursor-default group select-none transition-none ${isMoveDragging
                 ? 'opacity-0 pointer-events-none' // Hidden during move drag - rendered at global level to avoid track clipping
                 : 'z-0 border' // No transition - instant position update to prevent drop bounce
-                } ${isTrimming ? 'border-yellow-400 ring-1 ring-yellow-400 z-20' : ''} ${isSelected && !isMoveDragging && !isTrimming ? 'border-yellow-400 ring-1 ring-yellow-400 z-10' : !isMoveDragging && !isTrimming ? 'border-indigo-500 hover:border-indigo-400' : ''}`}
+                } ${isTrimming ? 'border-orange-500 ring-2 ring-orange-500 z-20' : ''} ${isSelected && !isMoveDragging && !isTrimming ? 'border-orange-500 ring-2 ring-orange-500 z-10' : !isMoveDragging && !isTrimming ? 'border-indigo-500 hover:border-indigo-400' : ''}`}
             style={{
                 left: visualLeft,
                 width: visualWidth,
@@ -507,7 +509,7 @@ export const UnlinkedAudioClipItem = memo(({
 
     return (
         <div
-            className={`audio-clip absolute top-0 h-9 bg-emerald-900 rounded overflow-hidden border-2 cursor-pointer transition-none ${isSelected && !isTrimming ? 'border-yellow-400 ring-2 ring-yellow-400 z-10' : isTrimming ? 'border-yellow-400 ring-2 ring-yellow-400 z-20' : 'border-emerald-500 hover:border-emerald-400'} ${isDragging ? 'opacity-0' : ''}`}
+            className={`audio-clip absolute top-0 h-9 bg-emerald-900 rounded overflow-hidden border-2 cursor-pointer transition-none ${isSelected && !isTrimming ? 'border-orange-500 ring-2 ring-orange-500 z-10' : isTrimming ? 'border-orange-500 ring-2 ring-orange-500 z-20' : 'border-emerald-500 hover:border-emerald-400'} ${isDragging ? 'opacity-0' : ''}`}
             style={{
                 left: clip.startTime * pxPerSec + trimLeftOffset,
                 width: Math.max(clipWidth - trimLeftOffset + trimRightOffset, 20),
@@ -563,7 +565,7 @@ export const UnlinkedAudioClipItem = memo(({
                 <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 bg-yellow-400/60 group-hover:bg-yellow-400 transition-all" style={{ height: '0.5px' }} />
             </div>
 
-            <div className="absolute top-0.5 left-1 text-[8px] text-emerald-300 pointer-events-none">🔊 분리됨</div>
+            <div className="absolute top-0.5 left-1 text-[8px] text-emerald-300 pointer-events-none max-w-full truncate">🔊 {clip.name || '분리됨'}</div>
         </div>
     );
 });
