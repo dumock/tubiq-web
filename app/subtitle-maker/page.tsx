@@ -52,6 +52,8 @@ const splitTextToWords = (text: string, startTime: number, endTime: number) => {
 export default function SubtitleMakerPage() {
     // Media State
     const [videoUrl, setVideoUrl] = useState<string | null>(null);
+    const [blobVideoUrl, setBlobVideoUrl] = useState<string | null>(null); // Cached blob URL for instant scrubbing
+    const [isLoadingBlob, setIsLoadingBlob] = useState(false);
     const [videoFile, setVideoFile] = useState<File | null>(null);
     const [audioFile, setAudioFile] = useState<File | null>(null);
     const [scriptText, setScriptText] = useState('');
@@ -195,6 +197,8 @@ export default function SubtitleMakerPage() {
 
 
     const [playbackTime, setPlaybackTime] = useState(0);
+    // Ref for instant access by render loop (no React re-render wait)
+    const playbackTimeRef = useRef(0);
 
     // =============================
     // PLAYBACK ENGINE
@@ -215,8 +219,11 @@ export default function SubtitleMakerPage() {
         duration,
         shouldMuteVideo: false, // DEPRECATED: Engine now handles per-clip muting via clip.hasAudio (was: audioClips.length > 0 || videoClips.some(c => c.hasAudio && c.isAudioLinked === false)),
         onTimeUpdate: (time) => {
+            // Update ref immediately for render loop (no wait for React)
+            playbackTimeRef.current = time;
             setPlaybackTime(time);
-        }
+        },
+        blobVideoUrl // Pre-cached blob URL for instant scrubbing
     });
 
     const setCurrentTime = (timeOrFn: number | ((prev: number) => number)) => {
@@ -800,6 +807,87 @@ export default function SubtitleMakerPage() {
         }
     }, [videoUrl, videoClips]);
 
+    // =============================
+    // BLOB VIDEO CACHING FOR INSTANT SCRUBBING
+    // =============================
+    // Pre-download HTTP videos as Blob for smooth scrubbing (no network latency on seek)
+    useEffect(() => {
+        // Debug: Check why blob caching might not trigger
+        console.log('[BlobCache] Check:', { videoUrl: videoUrl?.substring(0, 50), blobVideoUrl: !!blobVideoUrl });
+
+        // Skip if no URL, already have blob, or URL is already local
+        if (!videoUrl) {
+            console.log('[BlobCache] Skipped: no videoUrl');
+            return;
+        }
+        if (blobVideoUrl) {
+            console.log('[BlobCache] Skipped: already have blobVideoUrl');
+            return;
+        }
+        if (videoUrl.startsWith('blob:') || videoUrl.startsWith('data:')) {
+            console.log('[BlobCache] Skipped: videoUrl is already blob/data URL');
+            return;
+        }
+        if (!videoUrl.startsWith('http')) {
+            console.log('[BlobCache] Skipped: videoUrl does not start with http');
+            return;
+        }
+
+        let cancelled = false;
+        const abortController = new AbortController();
+
+        const loadVideoAsBlob = async () => {
+            setIsLoadingBlob(true);
+            console.log('[BlobCache] Starting video download for instant scrubbing...');
+
+            try {
+                // Use proxy to avoid CORS
+                const proxyUrl = `/api/proxy-video?url=${encodeURIComponent(videoUrl)}`;
+                const response = await fetch(proxyUrl, {
+                    signal: abortController.signal
+                });
+
+                if (cancelled) return;
+
+                if (!response.ok) {
+                    console.warn('[BlobCache] Failed to fetch video:', response.status);
+                    return;
+                }
+
+                const blob = await response.blob();
+                if (cancelled) return;
+
+                const objectUrl = URL.createObjectURL(blob);
+                console.log('[BlobCache] Video cached as Blob URL for instant scrubbing');
+                setBlobVideoUrl(objectUrl);
+            } catch (error) {
+                if (!cancelled && (error as Error).name !== 'AbortError') {
+                    console.warn('[BlobCache] Error loading video as blob:', error);
+                }
+            } finally {
+                if (!cancelled) {
+                    setIsLoadingBlob(false);
+                }
+            }
+        };
+
+        loadVideoAsBlob();
+
+        return () => {
+            cancelled = true;
+            abortController.abort();
+        };
+    }, [videoUrl, blobVideoUrl]);
+
+    // Cleanup blob URL on unmount or videoUrl change
+    useEffect(() => {
+        return () => {
+            if (blobVideoUrl) {
+                URL.revokeObjectURL(blobVideoUrl);
+            }
+        };
+    }, [blobVideoUrl]);
+
     // Dynamic Active Layers
     const activeLayers = useMemo(() => {
         const max = Math.max(0, ...videoClips.map(c => c.layer || 0));
@@ -814,11 +902,24 @@ export default function SubtitleMakerPage() {
         const maxAudioEnd = audioClips.length > 0
             ? Math.max(...audioClips.map(c => c.endTime))
             : 0;
-        const newDuration = Math.max(maxVideoEnd, maxAudioEnd, duration);
 
-        // Only update if clips extend beyond current duration
-        if (newDuration > duration) {
-            setDuration(newDuration);
+        // Calculate actual max end time from clips only (not including old duration)
+        const clipsMaxEnd = Math.max(maxVideoEnd, maxAudioEnd);
+
+        // If all clips are deleted, reset to original video duration
+        // Otherwise, use the max end time of clips
+        if (videoClips.length === 0 && audioClips.length === 0) {
+            // All clips deleted - reset to original video duration if available
+            if (mainVideoRef.current && mainVideoRef.current.duration && !isNaN(mainVideoRef.current.duration)) {
+                const originalDuration = mainVideoRef.current.duration;
+                console.log('[Duration Reset] All clips deleted, resetting to original:', originalDuration);
+                setDuration(originalDuration);
+            }
+            // NOTE: Do NOT reset hasInitializedClips here - we don't want auto-creation
+            // Let user manually add clips via drop or upload
+        } else if (clipsMaxEnd !== duration) {
+            // Update duration to match actual clips
+            setDuration(clipsMaxEnd);
         }
     }, [videoClips, audioClips]);
 
@@ -1119,11 +1220,16 @@ export default function SubtitleMakerPage() {
                         isAudioLinked: true,
                     };
 
+                    // Prevent initialization useEffect from creating duplicate clip
+                    hasInitializedClips.current = true;
+
                     updateVideoClipsWithHistory(prev => [...prev, newClip]);
                     setAssets(prev => ({ ...prev, [asset.id]: finalUrl }));
 
                     // Set as main video if first clip
                     if (!videoUrl) {
+                        // Prevent videoUrl change from resetting clips
+                        ignoreResetRef.current = true;
                         setVideoUrl(finalUrl);
                     }
 
@@ -1155,10 +1261,15 @@ export default function SubtitleMakerPage() {
                         hasAudio: true,
                         isAudioLinked: true,
                     };
+                    // Prevent initialization useEffect from creating duplicate clip
+                    hasInitializedClips.current = true;
+
                     updateVideoClipsWithHistory(prev => [...prev, newClip]);
                     setAssets(prev => ({ ...prev, [asset.id]: finalUrl }));
 
                     if (!videoUrl) {
+                        // Prevent videoUrl change from resetting clips
+                        ignoreResetRef.current = true;
                         setVideoUrl(finalUrl);
                     }
 
@@ -1211,11 +1322,16 @@ export default function SubtitleMakerPage() {
                         isAudioLinked: true,
                     };
 
+                    // Prevent duplicate clip creation from initialization useEffect
+                    hasInitializedClips.current = true;
+
                     updateVideoClipsWithHistory(prev => [...prev, newClip]);
 
                     // Set as main video if first clip
                     if (!videoUrl) {
                         setVideoFile(file);
+                        // Prevent videoUrl change from resetting clips
+                        ignoreResetRef.current = true;
                         setVideoUrl(localUrl);
                     }
 
@@ -1226,9 +1342,6 @@ export default function SubtitleMakerPage() {
                     }
 
                     console.log(`Local clip added to V${newLayer + 1} at ${snapStartTime}:`, clipId);
-
-                    // Prevent duplicate clip creation from initialization useEffect
-                    hasInitializedClips.current = true;
                 };
 
                 // Background upload
@@ -1324,6 +1437,9 @@ export default function SubtitleMakerPage() {
                 ratio: videoRatio // Store actual aspect ratio
             };
 
+            // Prevent initialization useEffect from creating duplicate clip
+            hasInitializedClips.current = true;
+
             updateVideoClipsWithHistory(prev => [...prev, newClip]);
 
             // Update duration if this clip extends beyond current duration
@@ -1334,6 +1450,8 @@ export default function SubtitleMakerPage() {
 
             // Set as main video only if this is the first clip
             if (videoClips.length === 0) {
+                // Prevent videoUrl change from resetting clips
+                ignoreResetRef.current = true;
                 setVideoUrl(localUrl);
             }
 
@@ -1344,7 +1462,122 @@ export default function SubtitleMakerPage() {
         uploadToSupabase(file);
     };
 
+    // Handle Q Drive asset drop on timeline (with specific drop time)
+    const handleTimelineAssetDrop = async (assetDataStr: string, dropTime: number) => {
+        try {
+            const asset = JSON.parse(assetDataStr);
+            console.log("[Timeline Asset Drop] Q Drive Asset at time:", dropTime, asset);
 
+            // If from Storage, get signed URL for proper playback
+            let finalUrl = asset.url;
+            if (asset.platform === 'storage' && asset.url) {
+                const urlObj = new URL(asset.url);
+                const pathMatch = urlObj.pathname.match(/\/videos\/(.+)$/);
+                if (pathMatch) {
+                    const storagePath = decodeURIComponent(pathMatch[1]);
+                    const { data } = await supabase.storage.from('videos').createSignedUrl(storagePath, 3600);
+                    if (data?.signedUrl) {
+                        finalUrl = data.signedUrl;
+                        console.log("Using signed URL for storage asset:", finalUrl);
+                    }
+                }
+            }
+
+            const newClipId = `clip-${Date.now()}`;
+
+            // Load video metadata to get actual duration
+            const videoEl = document.createElement('video');
+            videoEl.crossOrigin = 'anonymous';
+            const proxiedUrl = finalUrl.startsWith('http')
+                ? `/api/proxy-video?url=${encodeURIComponent(finalUrl)}`
+                : finalUrl;
+            videoEl.src = proxiedUrl;
+
+            videoEl.onloadedmetadata = () => {
+                const videoDuration = videoEl.duration || 10;
+
+                // Find available layer at the drop position
+                // Check which layer has no overlap at dropTime
+                let newLayer = 0;
+                for (let layer = 0; layer <= videoClips.length; layer++) {
+                    const layerClips = videoClips.filter(c => (c.layer || 0) === layer);
+                    const hasOverlap = layerClips.some(c =>
+                        (dropTime >= c.startTime && dropTime < c.endTime) ||
+                        (dropTime + videoDuration > c.startTime && dropTime + videoDuration <= c.endTime) ||
+                        (dropTime <= c.startTime && dropTime + videoDuration >= c.endTime)
+                    );
+                    if (!hasOverlap) {
+                        newLayer = layer;
+                        break;
+                    }
+                }
+
+                const newClip: VideoClip = {
+                    id: newClipId,
+                    startTime: dropTime,
+                    endTime: dropTime + videoDuration,
+                    sourceStart: 0,
+                    sourceEnd: videoDuration,
+                    sourceDuration: videoDuration,
+                    layer: newLayer,
+                    assetId: asset.id,
+                    src: finalUrl,
+                    hasAudio: true,
+                    isAudioLinked: true,
+                };
+
+                // Prevent initialization useEffect from creating duplicate clip
+                hasInitializedClips.current = true;
+
+                updateVideoClipsWithHistory(prev => [...prev, newClip]);
+                setAssets(prev => ({ ...prev, [asset.id]: finalUrl }));
+
+                // Set as main video if first clip
+                if (!videoUrl) {
+                    ignoreResetRef.current = true;
+                    setVideoUrl(finalUrl);
+                }
+
+                // Update duration if needed
+                const newEndTime = dropTime + videoDuration;
+                if (newEndTime > duration) {
+                    setDuration(newEndTime);
+                }
+
+                console.log(`[Timeline Asset Drop] Added clip to V${newLayer + 1} at ${dropTime}:`, newClipId);
+            };
+
+            videoEl.onerror = () => {
+                console.error("[Timeline Asset Drop] Failed to load video metadata");
+                // Fallback: create clip with default duration
+                const newClip: VideoClip = {
+                    id: newClipId,
+                    startTime: dropTime,
+                    endTime: dropTime + 10,
+                    sourceStart: 0,
+                    sourceEnd: 10,
+                    layer: 0,
+                    assetId: asset.id,
+                    src: finalUrl,
+                    hasAudio: true,
+                    isAudioLinked: true,
+                };
+
+                hasInitializedClips.current = true;
+                updateVideoClipsWithHistory(prev => [...prev, newClip]);
+                setAssets(prev => ({ ...prev, [asset.id]: finalUrl }));
+
+                if (!videoUrl) {
+                    ignoreResetRef.current = true;
+                    setVideoUrl(finalUrl);
+                }
+
+                console.log(`[Timeline Asset Drop] Added fallback clip at ${dropTime}:`, newClipId);
+            };
+        } catch (err) {
+            console.error("[Timeline Asset Drop] Failed to parse asset data:", err);
+        }
+    };
 
 
 
@@ -1354,30 +1587,43 @@ export default function SubtitleMakerPage() {
     useEffect(() => {
         let animationFrameId: number;
 
+        // Debug: log every 60 frames
+        let frameCount = 0;
         const renderLoop = () => {
             const canvas = canvasRef.current;
             const ctx = canvas?.getContext('2d', { alpha: false }); // Optimize for no transparency
 
             if (canvas && ctx) {
                 // 2. Identify Active Clips at Current Time
-                // CRITICAL: Always use playbackTime (timeline time) for clip filtering
+                // CRITICAL: Use ref for instant access during scrubbing (no React re-render wait)
                 // mainVideoElement.currentTime is VIDEO SOURCE time, not timeline time!
                 // After a gap, video.currentTime (e.g., 5.72) doesn't match timeline time (e.g., 9.60)
-                const masterTime = playbackTime;
+                const masterTime = playbackTimeRef.current;
 
                 const activeClips = videoClips
                     .filter(c => masterTime >= c.startTime && masterTime < c.endTime && !c.isHidden)
                     .sort((a, b) => (a.layer || 0) - (b.layer || 0));
 
                 // Check if main video is ready to draw (only if there's actually a V1 clip)
+                // Use readyState >= 1 to allow drawing during seeking (browser may still have decoded frame)
                 const mainClip = activeClips.find(c => (c.layer || 0) === 0);
-                const mainVideoReady = mainClip && mainVideoElement && mainVideoElement.readyState >= 2;
+                const mainVideoReady = mainClip && mainVideoElement && mainVideoElement.readyState >= 1;
+
+                // Debug logging (every 60 frames = ~1 second)
+                frameCount++;
+                if (frameCount % 60 === 0) {
+                    console.log('[RenderLoop] masterTime:', masterTime.toFixed(2),
+                        'activeClips:', activeClips.length,
+                        'mainVideoEl:', !!mainVideoElement,
+                        'readyState:', mainVideoElement?.readyState,
+                        'videoCurrentTime:', mainVideoElement?.currentTime?.toFixed(2));
+                }
 
                 // Check if any overlay clip is ready to draw (for V2-only case)
                 const anyOverlayReady = activeClips.some(c => {
                     if ((c.layer || 0) === 0) return false; // Skip main clip
                     const videoEl = hiddenVideoRefs.current.get(c.id);
-                    return videoEl && videoEl.readyState >= 2;
+                    return videoEl && videoEl.readyState >= 1;
                 });
 
                 // CRITICAL: Only clear canvas if we have something READY to draw
@@ -1401,7 +1647,7 @@ export default function SubtitleMakerPage() {
                         videoEl = hiddenVideoRefs.current.get(clip.id);
                     }
 
-                    if (videoEl && videoEl.readyState >= 2) { // HAVE_CURRENT_DATA
+                    if (videoEl && videoEl.readyState >= 1) { // Allow drawing during seeking
                         // Sync Overlay Videos to Master Time
                         if ((clip.layer || 0) > 0) {
                             const offset = masterTime - clip.startTime;
@@ -1500,7 +1746,11 @@ export default function SubtitleMakerPage() {
                             }
                         }
 
-                        ctx.drawImage(videoEl, drawX, drawY, drawW, drawH);
+                        try {
+                            ctx.drawImage(videoEl, drawX, drawY, drawW, drawH);
+                        } catch {
+                            // Ignore draw errors during seeking
+                        }
                     }
                 });
             }
@@ -1513,8 +1763,56 @@ export default function SubtitleMakerPage() {
         return () => {
             cancelAnimationFrame(animationFrameId);
         };
-    }, [videoClips, playbackTime, isPlaying, mainVideoElement]); // Dependencies
+    }, [videoClips, isPlaying, mainVideoElement]); // Dependencies - use playbackTimeRef for instant scrubbing
 
+    // Force canvas update on seeked event (crucial for scrubbing)
+    useEffect(() => {
+        const video = mainVideoElement;
+        if (!video) return;
+
+        const handleSeeked = () => {
+            // Force immediate canvas redraw when seek completes
+            const canvas = canvasRef.current;
+            const ctx = canvas?.getContext('2d', { alpha: false });
+            if (!canvas || !ctx || video.readyState < 2) return;
+
+            const masterTime = playbackTimeRef.current;
+            const activeClip = videoClips.find(c =>
+                masterTime >= c.startTime && masterTime < c.endTime &&
+                (c.layer === 0 || c.layer === undefined) && !c.isHidden
+            );
+
+            if (activeClip) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                // Calculate draw dimensions (contain/fit)
+                const srcRatio = video.videoWidth / video.videoHeight;
+                const dstRatio = canvas.width / canvas.height;
+                let drawX = 0, drawY = 0, drawW = canvas.width, drawH = canvas.height;
+
+                if (srcRatio > dstRatio) {
+                    drawW = canvas.width;
+                    drawH = canvas.width / srcRatio;
+                    drawY = (canvas.height - drawH) / 2;
+                } else {
+                    drawH = canvas.height;
+                    drawW = canvas.height * srcRatio;
+                    drawX = (canvas.width - drawW) / 2;
+                }
+
+                try {
+                    ctx.drawImage(video, drawX, drawY, drawW, drawH);
+                } catch {
+                    // Ignore draw errors
+                }
+            }
+        };
+
+        video.addEventListener('seeked', handleSeeked);
+        return () => video.removeEventListener('seeked', handleSeeked);
+    }, [mainVideoElement, videoClips]);
 
     // Audio Sync for Overlays (Volume/Mute)
     // We unmute all active overlays to allow mixing, or handle volume.
@@ -1563,13 +1861,6 @@ export default function SubtitleMakerPage() {
             // Detect clip transition
             const isNewClip = currentAudioClipRef.current !== clip.id;
 
-            if (isNewClip) {
-                // CRITICAL: Stop previous audio immediately before switching
-                audioEl.pause();
-                audioEl.currentTime = 0;
-                currentAudioClipRef.current = clip.id;
-            }
-
             // Use clip's own source (from video it was separated from)
             const src = clip.src || videoUrl;
             const currentSrc = audioEl.src || '';
@@ -1578,23 +1869,49 @@ export default function SubtitleMakerPage() {
             if (needsSourceChange) {
                 audioEl.pause();
                 audioEl.src = src;
-                audioEl.load(); // Ensure new source is loaded
+                currentAudioClipRef.current = clip.id;
+
+                // Wait for audio to load before seeking
+                const handleCanPlay = () => {
+                    const offset = currentTime - clip.startTime;
+                    const sourceTime = clip.sourceStart + offset;
+                    if (Number.isFinite(sourceTime) && sourceTime >= 0) {
+                        audioEl.currentTime = sourceTime;
+                        if (isPlaying) audioEl.play().catch(() => { });
+                    }
+                    audioEl.removeEventListener('canplay', handleCanPlay);
+                };
+                audioEl.addEventListener('canplay', handleCanPlay);
+                audioEl.load();
+                return;
             }
 
+            // Update current clip ref
+            if (isNewClip) {
+                currentAudioClipRef.current = clip.id;
+            }
+
+            // Calculate source time for this audio clip
             const offset = currentTime - clip.startTime;
             const sourceTime = clip.sourceStart + offset;
 
-            if (Number.isFinite(sourceTime)) {
+            if (Number.isFinite(sourceTime) && sourceTime >= 0) {
                 const drift = Math.abs(audioEl.currentTime - sourceTime);
+
                 if (isPlaying) {
-                    // Sync time first, then play
+                    // Sync time first when transitioning to new clip or drifted too far
                     if (drift > 0.1 || isNewClip) {
                         audioEl.currentTime = sourceTime;
                     }
-                    if (audioEl.paused) audioEl.play().catch(() => { });
+                    if (audioEl.paused) {
+                        audioEl.play().catch(() => { });
+                    }
                 } else {
                     if (!audioEl.paused) audioEl.pause();
-                    if (drift > 0.1) audioEl.currentTime = sourceTime;
+                    // Always sync time when paused and drifted
+                    if (drift > 0.05 || isNewClip) {
+                        audioEl.currentTime = sourceTime;
+                    }
                 }
             }
         } else {
@@ -2582,8 +2899,8 @@ export default function SubtitleMakerPage() {
                                                 style={{ zIndex: 1 }}
                                             />
 
-                                            {/* HIDDEN VIDEO POOL (Sources) */}
-                                            <div style={{ display: 'none' }}>
+                                            {/* HIDDEN VIDEO POOL (Sources) - Use offscreen positioning instead of display:none for proper frame decoding */}
+                                            <div style={{ position: 'absolute', left: '-9999px', top: '-9999px', width: '1px', height: '1px', overflow: 'hidden' }}>
                                                 {/* Main Video (Layer 0) */}
                                                 <video
                                                     ref={(el) => {
@@ -2591,13 +2908,9 @@ export default function SubtitleMakerPage() {
                                                         if (el && !mainVideoElement) setMainVideoElement(el);
                                                     }}
                                                     crossOrigin="anonymous"
-                                                    src={videoUrl ? (videoUrl.startsWith('http') ? `/api/proxy-video?url=${encodeURIComponent(videoUrl)}` : videoUrl) : ''}
+                                                    src={blobVideoUrl || (videoUrl ? (videoUrl.startsWith('http') ? `/api/proxy-video?url=${encodeURIComponent(videoUrl)}` : videoUrl) : '')}
                                                     preload="auto"
                                                     muted={audioClips.length > 0 || videoClips.some(c => c.hasAudio && c.isAudioLinked === false)}
-                                                    onTimeUpdate={(e) => {
-                                                        const t = e.currentTarget.currentTime;
-                                                        setPlaybackTime(t);
-                                                    }}
                                                     onLoadedMetadata={(e) => {
                                                         const dur = e.currentTarget.duration;
                                                         // CRITICAL: Set duration for timeline and waveform
@@ -2637,7 +2950,6 @@ export default function SubtitleMakerPage() {
                                                                 }}
                                                                 crossOrigin="anonymous"
                                                                 src={src}
-                                                                className="hidden"
                                                                 preload="auto"
                                                                 muted={!!clip.isMuted || clip.isAudioLinked === false || audioClips.length > 0}
                                                                 playsInline
@@ -3012,7 +3324,10 @@ export default function SubtitleMakerPage() {
                                     </button>
 
                                     <button
-                                        onClick={() => setIsCutMode(!isCutMode)}
+                                        onClick={() => {
+                                            console.log('[CutMode Button] Toggling from', isCutMode, 'to', !isCutMode);
+                                            setIsCutMode(!isCutMode);
+                                        }}
                                         className={`flex items-center gap-2 px-3 py-1.5 rounded-lg font-bold text-sm transition-all shadow-md ${isCutMode ? 'bg-rose-500 text-white shadow-rose-500/20' : 'bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-zinc-700'}`}
                                     >
                                         <Scissors className="h-3.5 w-3.5" />
@@ -3389,6 +3704,7 @@ export default function SubtitleMakerPage() {
                                         }}
                                         isCutMode={isCutMode}
                                         onDropFile={handleTimelineDrop}
+                                        onDropAsset={handleTimelineAssetDrop}
                                         onUndo={handleUndo}
                                         onRedo={handleRedo}
                                         canUndo={historyIndex > 0}

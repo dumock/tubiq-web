@@ -70,6 +70,7 @@ interface TimelineEditorProps {
     canUndo?: boolean;
     canRedo?: boolean;
     onDropFile?: (file: File, time: number) => void;
+    onDropAsset?: (assetData: string, time: number) => void; // For Q Drive asset drops
     isCutMode?: boolean;
     // New Props for Linked Editing
     audioClips: AudioClip[];
@@ -178,6 +179,7 @@ export default function TimelineEditor({
     canUndo = false,
     canRedo = false,
     onDropFile,
+    onDropAsset,
     isCutMode = false,
     audioClips,
     onUpdateAudioClips,
@@ -186,6 +188,11 @@ export default function TimelineEditor({
     onEndScrub,
     onPreviewFrame
 }: TimelineEditorProps) {
+    // Debug: Log isCutMode changes
+    useEffect(() => {
+        console.log('[TimelineEditor] isCutMode prop changed:', isCutMode);
+    }, [isCutMode]);
+
     // Timeline State
     const [pxPerSec, setPxPerSec] = useState(100);
     const [hasInitializedZoom, setHasInitializedZoom] = useState(false);
@@ -202,9 +209,7 @@ export default function TimelineEditor({
     const dropIndicatorRef = useRef<HTMLDivElement>(null); // For free mode red line optimization
 
     // Real-time Trim DOM Refs
-    const trimActiveElementRef = useRef<HTMLElement | null>(null); // The clip element being trimmed
-    const trimRafRef = useRef<number | null>(null); // requestAnimationFrame ID
-    const trimOriginalDimsRef = useRef<{ left: number, width: number } | null>(null); // Original dimensions before trim
+    // Trim refs removed - now using React state for trim updates
 
     // CapCut-style Timeline Mode Toggles
     const [magnetMode, setMagnetMode] = useState(true); // 메인트랙 마그넷: clips auto-condense (no gaps)
@@ -249,6 +254,10 @@ export default function TimelineEditor({
     // Using internal clips state for optimistic updates, synced with external
     const [videoClips, setVideoClips] = useState<VideoClip[]>(externalClips);
     const [localAudioClips, setLocalAudioClips] = useState<AudioClip[]>(audioClips);
+
+    // Ref for async operations to get latest videoClips without stale closures
+    const videoClipsRef = useRef(videoClips);
+    videoClipsRef.current = videoClips;
 
     // Clipboard for copy/paste (stores copied clip data)
     const clipboardRef = useRef<{ type: 'video' | 'audio', clip: VideoClip | AudioClip } | null>(null);
@@ -379,10 +388,18 @@ export default function TimelineEditor({
 
     // Derived single ID for backward compatibility properties (like property panel)
     // If multiple selected, maybe we just show the first one or null
+    // IMPORTANT: Only sync VIDEO clip IDs to selectedClipId, not audio clip IDs
     useEffect(() => {
         if (selectedClipIds.size === 1) {
             const id = Array.from(selectedClipIds)[0];
-            if (id !== selectedClipId) setSelectedClipId(id);
+            // Check if this ID belongs to a video clip (not audio)
+            const isVideoClip = videoClips.some(c => c.id === id);
+            if (isVideoClip) {
+                if (id !== selectedClipId) setSelectedClipId(id);
+            } else {
+                // It's an audio clip - make sure selectedClipId is null
+                if (selectedClipId !== null) setSelectedClipId(null);
+            }
         } else if (selectedClipIds.size > 1) {
             // If multiple, strictly separate from 'selectedClipId' which might be used for single-clip props??
             // For now, let's keep selectedClipId as the "primary" selection if valid
@@ -390,7 +407,7 @@ export default function TimelineEditor({
         } else {
             if (selectedClipId) setSelectedClipId(null);
         }
-    }, [selectedClipIds]);
+    }, [selectedClipIds, videoClips]);
 
     // Smooth playhead & Scrubbing state
     const playheadRef = useRef<HTMLDivElement>(null);
@@ -632,38 +649,32 @@ export default function TimelineEditor({
         if (videoClips.length === 0) return;
 
         const processClips = async () => {
-            let hasGlobalChanges = false;
-            const updatedClips = [...videoClips];
-            let madeChanges = false;
+            // Find clips that need frame extraction from current state
+            const clipsNeedingFrames = videoClips.filter(
+                clip => clip.src && (!clip.frames || clip.frames.length === 0)
+            );
 
-            for (let i = 0; i < updatedClips.length; i++) {
-                const clip = updatedClips[i];
-                // Extract if: has src AND (no frames OR frames empty)
-                if (clip.src && (!clip.frames || clip.frames.length === 0)) {
-                    if (isGeneratingFramesRef.current) continue;
+            for (const clip of clipsNeedingFrames) {
+                if (isGeneratingFramesRef.current) continue;
 
-                    console.log('[FrameExtract] Extracting for clip:', clip.id);
-                    isGeneratingFramesRef.current = true;
-                    onFrameExtractionChange?.(true);
+                console.log('[FrameExtract] Extracting for clip:', clip.id);
+                isGeneratingFramesRef.current = true;
+                onFrameExtractionChange?.(true);
 
-                    try {
-                        const result = await extractFramesForClip(clip);
-                        if (result && result.frames.length > 0) {
-                            // Use ratio directly from extraction (synchronous, not from state)
-                            updatedClips[i] = { ...clip, frames: result.frames, ratio: result.ratio };
-                            madeChanges = true;
-                        }
-                    } catch (e) {
-                        console.error('[FrameExtract] Failed for clip:', clip.name, e);
-                    } finally {
-                        isGeneratingFramesRef.current = false;
-                        onFrameExtractionChange?.(false);
+                try {
+                    const result = await extractFramesForClip(clip);
+                    if (result && result.frames.length > 0) {
+                        // Use ref to get latest state and only update frames/ratio
+                        onUpdateVideoClips(videoClipsRef.current.map(c =>
+                            c.id === clip.id ? { ...c, frames: result.frames, ratio: result.ratio } : c
+                        ));
                     }
+                } catch (e) {
+                    console.error('[FrameExtract] Failed for clip:', clip.name, e);
+                } finally {
+                    isGeneratingFramesRef.current = false;
+                    onFrameExtractionChange?.(false);
                 }
-            }
-
-            if (madeChanges) {
-                onUpdateVideoClips(updatedClips);
             }
         };
 
@@ -764,7 +775,8 @@ export default function TimelineEditor({
             }
 
             // Update the video clip with the extracted waveform
-            onUpdateVideoClips(videoClips.map(c =>
+            // Use ref to get latest videoClips state to avoid overwriting user changes
+            onUpdateVideoClips(videoClipsRef.current.map(c =>
                 c.id === clip.id ? { ...c, waveform } : c
             ));
 
@@ -773,7 +785,7 @@ export default function TimelineEditor({
         } catch (e) {
             console.error('[Waveform] Failed to extract clip waveform:', clip.id, e);
         }
-    }, [videoClips, onUpdateVideoClips]);
+    }, [onUpdateVideoClips]); // Remove videoClips from deps since we use ref
 
     // Auto-extract waveform for clips that don't have one
     useEffect(() => {
@@ -967,37 +979,12 @@ export default function TimelineEditor({
                 // Clamp: can't go before 0, can't go past end - minDuration
                 newStart = Math.max(0, Math.min(newStart, drag.originalEnd - minDuration));
 
-                // Calculate trim offset in pixels
-                const trimOffset = (newStart - drag.originalStart) * pxPerSec;
+                // Calculate the effective delta (after clamping)
+                const effectiveDelta = newStart - drag.originalStart;
 
-                // Direct DOM manipulation for 60fps smooth updates
-                if (!trimActiveElementRef.current) {
-                    // Find and store the clip element on first move
-                    const clipEl = containerRef.current?.querySelector(`[data-clip-id="${clip.id}"]`) as HTMLElement;
-                    if (clipEl) {
-                        trimActiveElementRef.current = clipEl;
-                        trimOriginalDimsRef.current = {
-                            left: clip.startTime * pxPerSec,
-                            width: (clip.endTime - clip.startTime) * pxPerSec
-                        };
-                    }
-                }
-
-                // Apply DOM changes directly using rAF
-                if (trimActiveElementRef.current && trimOriginalDimsRef.current) {
-                    if (trimRafRef.current) cancelAnimationFrame(trimRafRef.current);
-                    trimRafRef.current = requestAnimationFrame(() => {
-                        const el = trimActiveElementRef.current;
-                        const orig = trimOriginalDimsRef.current;
-                        if (el && orig) {
-                            el.style.left = `${orig.left + trimOffset}px`;
-                            el.style.width = `${orig.width - trimOffset}px`;
-                        }
-                    });
-                }
-
-                // Store current delta for mouseup calculation (minimal state update)
-                isDraggingRef.current = { ...drag, currentX: deltaTime };
+                // Update both ref and state for React to render correctly
+                isDraggingRef.current = { ...drag, currentX: effectiveDelta };
+                setIsDragging({ ...drag, currentX: effectiveDelta });
                 return;
             }
 
@@ -1012,43 +999,84 @@ export default function TimelineEditor({
                 // Clamp: can't go before start + minDuration
                 newEnd = Math.max(drag.originalStart + minDuration, newEnd);
 
-                // Clamp: can't extend beyond original source duration
-                const sourceDuration = clip.sourceEnd ?? (clip.endTime - clip.startTime);
-                const currentSourceStart = clip.sourceStart ?? 0;
-                const maxExtension = sourceDuration - currentSourceStart - (clip.endTime - clip.startTime);
-                const maxEnd = drag.originalEnd + maxExtension;
-                newEnd = Math.min(newEnd, maxEnd);
+                // Calculate available extension based on source duration
+                const currentSourceEnd = clip.sourceEnd ?? (clip.endTime - clip.startTime);
+                const fullSourceDuration = clip.sourceDuration ?? currentSourceEnd;
+                const maxExtension = fullSourceDuration - currentSourceEnd;
 
-                // Calculate trim offset in pixels
-                const trimOffset = (newEnd - drag.originalEnd) * pxPerSec;
-
-                // Direct DOM manipulation for 60fps smooth updates
-                if (!trimActiveElementRef.current) {
-                    // Find and store the clip element on first move
-                    const clipEl = containerRef.current?.querySelector(`[data-clip-id="${clip.id}"]`) as HTMLElement;
-                    if (clipEl) {
-                        trimActiveElementRef.current = clipEl;
-                        trimOriginalDimsRef.current = {
-                            left: clip.startTime * pxPerSec,
-                            width: (clip.endTime - clip.startTime) * pxPerSec
-                        };
-                    }
+                // Only block EXTENDING when at max source length, allow SHRINKING
+                if (deltaTime > 0 && maxExtension <= 0) {
+                    // Trying to extend but already at max - keep at original
+                    newEnd = drag.originalEnd;
+                } else if (deltaTime > 0) {
+                    // Extending - limit to maxExtension
+                    newEnd = Math.min(newEnd, drag.originalEnd + maxExtension);
                 }
+                // deltaTime <= 0 means shrinking - always allowed
 
-                // Apply DOM changes directly using rAF
-                if (trimActiveElementRef.current && trimOriginalDimsRef.current) {
-                    if (trimRafRef.current) cancelAnimationFrame(trimRafRef.current);
-                    trimRafRef.current = requestAnimationFrame(() => {
-                        const el = trimActiveElementRef.current;
-                        const orig = trimOriginalDimsRef.current;
-                        if (el && orig) {
-                            el.style.width = `${orig.width + trimOffset}px`;
-                        }
-                    });
+                // Calculate the effective delta (after clamping)
+                const effectiveDelta = newEnd - drag.originalEnd;
+
+                // Update both ref and state for React to render correctly
+                isDraggingRef.current = { ...drag, currentX: effectiveDelta };
+                setIsDragging({ ...drag, currentX: effectiveDelta });
+                return;
+            }
+
+            // ====== AUDIO LEFT TRIM (adjust start) ======
+            if (drag.type === 'left' && drag.target === 'audio') {
+                const audioClip = localAudioClips.find(c => c.id === drag.id);
+                if (!audioClip) return;
+
+                // Calculate new start time
+                let newStart = drag.originalStart + deltaTime;
+                const minDuration = 0.1; // Minimum clip duration (100ms)
+
+                // Clamp: can't go before 0, can't go past end - minDuration
+                newStart = Math.max(0, Math.min(newStart, drag.originalEnd - minDuration));
+
+                // Calculate the effective delta (after clamping)
+                const effectiveDelta = newStart - drag.originalStart;
+
+                // Update both ref and state for React to render correctly
+                isDraggingRef.current = { ...drag, currentX: effectiveDelta };
+                setIsDragging({ ...drag, currentX: effectiveDelta });
+                return;
+            }
+
+            // ====== AUDIO RIGHT TRIM (adjust end) ======
+            if (drag.type === 'right' && drag.target === 'audio') {
+                const audioClip = localAudioClips.find(c => c.id === drag.id);
+                if (!audioClip) return;
+
+                // Calculate new end time
+                let newEnd = drag.originalEnd + deltaTime;
+                const minDuration = 0.1; // Minimum clip duration (100ms)
+
+                // Clamp: can't go before start + minDuration
+                newEnd = Math.max(drag.originalStart + minDuration, newEnd);
+
+                // Calculate available extension based on source duration
+                const currentSourceEnd = audioClip.sourceEnd ?? (audioClip.endTime - audioClip.startTime);
+                const fullSourceDuration = audioClip.sourceDuration ?? currentSourceEnd;
+                const maxExtension = fullSourceDuration - currentSourceEnd;
+
+                // Only block EXTENDING when at max source length, allow SHRINKING
+                if (deltaTime > 0 && maxExtension <= 0) {
+                    // Trying to extend but already at max - keep at original
+                    newEnd = drag.originalEnd;
+                } else if (deltaTime > 0) {
+                    // Extending - limit to maxExtension
+                    newEnd = Math.min(newEnd, drag.originalEnd + maxExtension);
                 }
+                // deltaTime <= 0 means shrinking - always allowed
 
-                // Store current delta for mouseup calculation (minimal state update)
-                isDraggingRef.current = { ...drag, currentX: deltaTime };
+                // Calculate the effective delta (after clamping)
+                const effectiveDelta = newEnd - drag.originalEnd;
+
+                // Update both ref and state for React to render correctly
+                isDraggingRef.current = { ...drag, currentX: effectiveDelta };
+                setIsDragging({ ...drag, currentX: effectiveDelta });
                 return;
             }
 
@@ -1173,18 +1201,6 @@ export default function TimelineEditor({
                 const startShift = newStart - drag.originalStart;
                 const newSourceStart = Math.max(0, (clip.sourceStart ?? 0) + startShift);
 
-                // Reset DOM styles before React update (let React take over)
-                if (trimActiveElementRef.current) {
-                    trimActiveElementRef.current.style.left = '';
-                    trimActiveElementRef.current.style.width = '';
-                }
-
-                // Cleanup trim refs
-                if (trimRafRef.current) cancelAnimationFrame(trimRafRef.current);
-                trimActiveElementRef.current = null;
-                trimOriginalDimsRef.current = null;
-                trimRafRef.current = null;
-
                 // Update video clip
                 const updatedClips = videoClips.map(c =>
                     c.id === drag.id
@@ -1193,8 +1209,6 @@ export default function TimelineEditor({
                 );
                 setVideoClips(updatedClips);
                 onUpdateVideoClips(updatedClips);
-
-                // Sync linked audio logic removed for independence of separated audio clips
 
                 setDropIndicator(null);
                 setIsDragging(null);
@@ -1221,32 +1235,21 @@ export default function TimelineEditor({
                 const currentSourceEnd = clip.sourceEnd ?? (clip.endTime - clip.startTime);
                 let newSourceEnd = Math.max(clip.sourceStart ?? 0, currentSourceEnd + endShift);
 
-                // Clamp to original source duration ONLY if explicitly set
-                // This prevents extending beyond original video length for new clips
-                if (clip.sourceDuration !== undefined) {
-                    newSourceEnd = Math.min(newSourceEnd, clip.sourceDuration);
-                    // Also clamp newEnd based on source limit
-                    const maxExtension = clip.sourceDuration - currentSourceEnd;
-                    if (maxExtension <= 0) {
-                        // Clip is already at max, don't allow extending
-                        newEnd = drag.originalEnd;
-                        newSourceEnd = currentSourceEnd;
-                    } else {
-                        newEnd = Math.min(newEnd, drag.originalEnd + maxExtension);
-                    }
-                }
+                // Calculate available extension based on source duration
+                const fullSourceDuration = clip.sourceDuration ?? currentSourceEnd;
+                const maxExtension = fullSourceDuration - currentSourceEnd;
 
-                // Reset DOM styles before React update (let React take over)
-                if (trimActiveElementRef.current) {
-                    trimActiveElementRef.current.style.left = '';
-                    trimActiveElementRef.current.style.width = '';
+                // Only block EXTENDING when at max source length, allow SHRINKING
+                if (deltaTime > 0 && maxExtension <= 0) {
+                    // Trying to extend but already at max - don't change
+                    newEnd = drag.originalEnd;
+                    newSourceEnd = currentSourceEnd;
+                } else if (deltaTime > 0) {
+                    // Extending - limit to maxExtension
+                    newEnd = Math.min(newEnd, drag.originalEnd + maxExtension);
+                    newSourceEnd = Math.min(newSourceEnd, fullSourceDuration);
                 }
-
-                // Cleanup trim refs
-                if (trimRafRef.current) cancelAnimationFrame(trimRafRef.current);
-                trimActiveElementRef.current = null;
-                trimOriginalDimsRef.current = null;
-                trimRafRef.current = null;
+                // deltaTime <= 0 means shrinking - always allowed
 
                 // Update video clip
                 const updatedClips = videoClips.map(c =>
@@ -1257,7 +1260,90 @@ export default function TimelineEditor({
                 setVideoClips(updatedClips);
                 onUpdateVideoClips(updatedClips);
 
-                // Sync linked audio logic removed for independence of separated audio clips
+                setDropIndicator(null);
+                setIsDragging(null);
+                return;
+            }
+
+            // ====== AUDIO LEFT TRIM (adjust start) ======
+            if (drag.type === 'left' && drag.target === 'audio') {
+                const audioClip = localAudioClips.find(c => c.id === drag.id);
+                if (!audioClip) {
+                    setDropIndicator(null);
+                    setIsDragging(null);
+                    return;
+                }
+
+                // Calculate new start time
+                let newStart = drag.originalStart + deltaTime;
+                const minDuration = 0.1;
+
+                // Clamp
+                newStart = Math.max(0, Math.min(newStart, drag.originalEnd - minDuration));
+
+                // Calculate source shift
+                const startShift = newStart - drag.originalStart;
+                const newSourceStart = Math.max(0, (audioClip.sourceStart ?? 0) + startShift);
+
+                // Update audio clip
+                const updatedAudioClips = localAudioClips.map(c =>
+                    c.id === drag.id
+                        ? { ...c, startTime: newStart, sourceStart: newSourceStart }
+                        : c
+                );
+                setLocalAudioClips(updatedAudioClips);
+                onUpdateAudioClips(updatedAudioClips);
+
+                setDropIndicator(null);
+                setIsDragging(null);
+                return;
+            }
+
+            // ====== AUDIO RIGHT TRIM (adjust end) ======
+            if (drag.type === 'right' && drag.target === 'audio') {
+                const audioClip = localAudioClips.find(c => c.id === drag.id);
+                if (!audioClip) {
+                    setDropIndicator(null);
+                    setIsDragging(null);
+                    return;
+                }
+
+                // Calculate new end time
+                let newEnd = drag.originalEnd + deltaTime;
+                const minDuration = 0.1;
+
+                // Clamp: can't go before start + minDuration
+                newEnd = Math.max(drag.originalStart + minDuration, newEnd);
+
+                // Calculate new source end
+                const endShift = newEnd - drag.originalEnd;
+                const currentSourceEnd = audioClip.sourceEnd ?? (audioClip.endTime - audioClip.startTime);
+                let newSourceEnd = Math.max(audioClip.sourceStart ?? 0, currentSourceEnd + endShift);
+
+                // Calculate available extension based on source duration
+                const fullSourceDuration = audioClip.sourceDuration ?? currentSourceEnd;
+                const maxExtension = fullSourceDuration - currentSourceEnd;
+
+                // Only block EXTENDING when at max source length, allow SHRINKING
+                if (deltaTime > 0 && maxExtension <= 0) {
+                    // Trying to extend but already at max - don't change
+                    newEnd = drag.originalEnd;
+                    newSourceEnd = currentSourceEnd;
+                } else if (deltaTime > 0) {
+                    // Extending - limit to maxExtension
+                    newEnd = Math.min(newEnd, drag.originalEnd + maxExtension);
+                    newSourceEnd = Math.min(newSourceEnd, fullSourceDuration);
+                }
+                // deltaTime <= 0 means shrinking - always allowed
+
+                // Update audio clip
+                const updatedAudioClips = localAudioClips.map(c =>
+                    c.id === drag.id
+                        ? { ...c, endTime: newEnd, sourceEnd: newSourceEnd }
+                        : c
+                );
+                setLocalAudioClips(updatedAudioClips);
+                onUpdateAudioClips(updatedAudioClips);
 
                 setDropIndicator(null);
                 setIsDragging(null);
@@ -1474,8 +1560,13 @@ export default function TimelineEditor({
         const time = Math.max(0, Math.min(clickX / pxPerSec, duration));
 
         if (playheadRef.current) playheadRef.current.style.left = `${time * pxPerSec}px`;
-        onSeek(time);
-    }, [duration, pxPerSec, onSeek]);
+        // Use previewFrame for smooth scrubbing, fallback to seek
+        if (onPreviewFrame) {
+            onPreviewFrame(time);
+        } else {
+            onSeek(time);
+        }
+    }, [duration, pxPerSec, onSeek, onPreviewFrame]);
 
     const handleScrubEnd = useCallback(() => setIsScrubbing(false), []);
 
@@ -1513,7 +1604,12 @@ export default function TimelineEditor({
                     const time = Math.max(0, Math.min(clickX / pxPerSec, duration));
 
                     if (playheadRef.current) playheadRef.current.style.left = `${time * pxPerSec}px`;
-                    onSeek(time);
+                    // Use previewFrame for smooth scrubbing, fallback to seek
+                    if (onPreviewFrame) {
+                        onPreviewFrame(time);
+                    } else {
+                        onSeek(time);
+                    }
                 }
             }
             animationFrameId = requestAnimationFrame(autoScrollLoop);
@@ -1528,7 +1624,7 @@ export default function TimelineEditor({
             window.removeEventListener('mouseup', handleScrubEnd);
             cancelAnimationFrame(animationFrameId);
         };
-    }, [isScrubbing, handleScrubMove, handleScrubEnd, duration, pxPerSec, onSeek]);
+    }, [isScrubbing, handleScrubMove, handleScrubEnd, duration, pxPerSec, onSeek, onPreviewFrame]);
 
     const handleTrackMouseDown = (e: React.MouseEvent) => {
         // Prevent event bubbling if clicking a known interactive element
@@ -1629,15 +1725,20 @@ export default function TimelineEditor({
                 renderLayers.forEach(layer => {
                     totalVideoTracksHeight += (layer === 0) ? mainTrackHeight : slaveTrackHeight;
                 });
-                const audioTrackY1 = headerHeight + totalVideoTracksHeight;
-                const audioTrackY2 = audioTrackY1 + 36; // Audio track height (h-9 = 36px)
+                const audioTrackStartY = headerHeight + totalVideoTracksHeight;
+                const audioTrackHeight = 40; // h-10 = 40px
 
                 localAudioClips.forEach(clip => {
                     const clipX1 = headerColumnOffset + clip.startTime * pxPerSec;
                     const clipX2 = headerColumnOffset + clip.endTime * pxPerSec;
 
+                    // Calculate Y position based on the audio clip's layer
+                    const audioLayer = clip.layer || 0;
+                    const clipY1 = audioTrackStartY + (audioLayer * audioTrackHeight);
+                    const clipY2 = clipY1 + audioTrackHeight;
+
                     const overlapsX = clipX1 < boxRight && clipX2 > boxLeft;
-                    const overlapsY = audioTrackY1 < boxBottom && audioTrackY2 > boxTop;
+                    const overlapsY = clipY1 < boxBottom && clipY2 > boxTop;
 
                     if (overlapsX && overlapsY) {
                         newSelection.add(clip.id);
@@ -1659,21 +1760,35 @@ export default function TimelineEditor({
                 const x = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header column offset
                 const time = Math.max(0, Math.min(x / pxPerSec, duration));
                 if (playheadRef.current) playheadRef.current.style.left = `${time * pxPerSec}px`;
-                onSeek(time);
+                // Real-time frame preview during scrubbing (previewFrame handles both UI state and video seek)
+                // Do NOT call onSeek here - it conflicts with previewFrame's RAF-throttled seek
+                if (onPreviewFrame) {
+                    onPreviewFrame(time);
+                } else {
+                    onSeek(time);
+                }
             }
         }
     }, [interactionMode, isScrubbing, isDragging, pxPerSec, duration, onSeek, renderLayers, videoClips, localAudioClips, selectionBox, containerRef, interactionStartRef, setSelectedClipIds]);
 
     // Handle Mouse Up (Global)
     const handleGlobalMouseUp = useCallback((e: MouseEvent) => {
+        // ALWAYS reset interaction start ref first
+        interactionStartRef.current = null;
+
         if (interactionMode === 'select-candidate') {
             // It was a Click!
-            // 1. Move Playhead
+            // NOTE: Do NOT call onPlayPause here! seek() already pauses video internally.
+            // Calling pause() first would update currentTime incorrectly BEFORE seek runs.
+
+            // 1. Move Playhead (seek handles pause internally)
             if (containerRef.current) {
                 const rect = containerRef.current.getBoundingClientRect();
                 const clickX = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header column offset
                 const time = Math.max(0, Math.min(clickX / pxPerSec, duration));
                 onSeek(time);
+                // Also preview the frame at clicked position
+                onPreviewFrame?.(time);
             }
             // 2. Clear Selection
             setSelectedClipIds(new Set());
@@ -1681,7 +1796,7 @@ export default function TimelineEditor({
             setSelectedAudioClipId(null);
         }
 
-        // Always clear selection box and interaction mode
+        // Always clear selection box and interaction mode - do this unconditionally
         setInteractionMode('none');
         setSelectionBox(null);
 
@@ -1693,16 +1808,26 @@ export default function TimelineEditor({
 
         setIsDragging(null);
         setSnapIndicator(null); // Clear item drag too
-    }, [interactionMode, isScrubbing, duration, onSeek, pxPerSec, setSelectedClipIds, setSelectedClipId, setSelectedAudioClipId, containerRef, setInteractionMode, setSelectionBox, setIsScrubbing, setIsDragging, onEndScrub]);
+    }, [interactionMode, isScrubbing, duration, onSeek, onPreviewFrame, pxPerSec, setSelectedClipIds, setSelectedClipId, setSelectedAudioClipId, containerRef, setInteractionMode, setSelectionBox, setIsScrubbing, setIsDragging, onEndScrub]);
 
 
     // Attach Global Listeners
     useEffect(() => {
+        // Clean up selection box when window loses focus or mouse leaves
+        const handleCleanup = () => {
+            setSelectionBox(null);
+            setInteractionMode('none');
+            interactionStartRef.current = null;
+        };
+
         window.addEventListener('mousemove', handleGlobalMouseMove);
         window.addEventListener('mouseup', handleGlobalMouseUp);
+        window.addEventListener('blur', handleCleanup);
+
         return () => {
             window.removeEventListener('mousemove', handleGlobalMouseMove);
             window.removeEventListener('mouseup', handleGlobalMouseUp);
+            window.removeEventListener('blur', handleCleanup);
         };
     }, [handleGlobalMouseMove, handleGlobalMouseUp]);
 
@@ -1722,7 +1847,12 @@ export default function TimelineEditor({
             const clickX = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header column offset
             const time = Math.max(0, Math.min(clickX / pxPerSec, duration));
             if (playheadRef.current) playheadRef.current.style.left = `${time * pxPerSec}px`;
-            onSeek(time);
+            // Immediate frame preview on scrub start (previewFrame handles both UI state and video seek)
+            if (onPreviewFrame) {
+                onPreviewFrame(time);
+            } else {
+                onSeek(time);
+            }
         }
         // Scrubbing usually doesn't deselect? Or does it?
         // Let's keep selection during ruler scrub.
@@ -1764,15 +1894,49 @@ export default function TimelineEditor({
                 onUpdateVideoClips(newClips);
                 // If it was selected, select the second part
                 if (selectedClipId === clipId) setSelectedClipId(clip2.id);
+
+                // ALSO split the corresponding audio clip if it exists and is separated
+                const linkedAudioClip = localAudioClips.find(a => a.videoClipId === clipId || a.id === `audio-${clipId}`);
+                if (linkedAudioClip && time > linkedAudioClip.startTime && time < linkedAudioClip.endTime) {
+                    const audioRatio = (time - linkedAudioClip.startTime) / (linkedAudioClip.endTime - linkedAudioClip.startTime);
+                    const audioSourceSplit = linkedAudioClip.sourceStart + (linkedAudioClip.sourceEnd - linkedAudioClip.sourceStart) * audioRatio;
+                    const audio1: AudioClip = {
+                        ...linkedAudioClip,
+                        id: `${linkedAudioClip.id}-1`,
+                        videoClipId: clip1.id,
+                        endTime: time,
+                        sourceEnd: audioSourceSplit,
+                        waveform: undefined
+                    };
+                    const audio2: AudioClip = {
+                        ...linkedAudioClip,
+                        id: `${linkedAudioClip.id}-2`,
+                        videoClipId: clip2.id,
+                        startTime: time,
+                        sourceStart: audioSourceSplit,
+                        waveform: undefined
+                    };
+                    const newAudioClips = localAudioClips.filter(a => a.id !== linkedAudioClip.id).concat([audio1, audio2]).sort((a, b) => a.startTime - b.startTime);
+                    setLocalAudioClips(newAudioClips);
+                    onUpdateAudioClips(newAudioClips);
+                    console.log('[Split] Also split linked audio clip:', linkedAudioClip.id);
+                }
             }
         } else if (type === 'audio') {
             const audioClip = localAudioClips.find(a => a.id === clipId);
+            console.log('[Audio Split] clipId:', clipId, 'time:', time, 'clip:', audioClip ? `${audioClip.startTime}-${audioClip.endTime}` : 'NOT FOUND');
             if (audioClip && time > audioClip.startTime && time < audioClip.endTime) {
-                const ratio = (time - audioClip.startTime) / (audioClip.endTime - audioClip.startTime); // Fixed: audioClip.endTime - audioClip.startTime
+                const ratio = (time - audioClip.startTime) / (audioClip.endTime - audioClip.startTime);
                 const sourceSplit = audioClip.sourceStart + (audioClip.sourceEnd - audioClip.sourceStart) * ratio;
-                // Clear waveform so it regenerates for the new source range
-                const audio1: AudioClip = { ...audioClip, id: `${audioClip.id}-1`, endTime: time, sourceEnd: sourceSplit, waveform: undefined };
-                const audio2: AudioClip = { ...audioClip, id: `${audioClip.id}-2`, startTime: time, sourceStart: sourceSplit, waveform: undefined };
+
+                // Slice existing waveform proportionally for immediate visual feedback
+                const existingWaveform = audioClip.waveform || [];
+                const splitIndex = Math.floor(existingWaveform.length * ratio);
+                const waveform1 = existingWaveform.slice(0, splitIndex);
+                const waveform2 = existingWaveform.slice(splitIndex);
+
+                const audio1: AudioClip = { ...audioClip, id: `${audioClip.id}-1`, endTime: time, sourceEnd: sourceSplit, waveform: waveform1.length > 0 ? waveform1 : undefined };
+                const audio2: AudioClip = { ...audioClip, id: `${audioClip.id}-2`, startTime: time, sourceStart: sourceSplit, waveform: waveform2.length > 0 ? waveform2 : undefined };
                 const newAudioClips = localAudioClips.filter(a => a.id !== clipId).concat([audio1, audio2]).sort((a, b) => a.startTime - b.startTime);
                 setLocalAudioClips(newAudioClips);
                 onUpdateAudioClips(newAudioClips);
@@ -1786,6 +1950,7 @@ export default function TimelineEditor({
     // Toolbar handlers (Split/Delete/Zoom)
     const handleSplit = () => {
         const time = externalCurrentTime || videoElement?.currentTime || 0;
+        console.log('[handleSplit] selectedClipId:', selectedClipId, 'selectedAudioClipId:', selectedAudioClipId, 'time:', time);
 
         if (selectedClipId) {
             splitClip(selectedClipId, 'video', time);
@@ -1799,12 +1964,25 @@ export default function TimelineEditor({
     const handleContextMenuDelete = () => {
         if (!contextMenu) return;
 
-        if (contextMenu.type === 'clip') { // Fixed: 'video' -> 'clip'
-            // Delete video clip...
-            const targetId = contextMenu.id; // Fixed: clipId -> id
+        // If multiple clips are selected, delete all selected clips
+        if (selectedClipIds.size > 1) {
+            const idsToDelete = new Set(selectedClipIds);
+            const updatedVideoClips = videoClips.filter(c => !idsToDelete.has(c.id));
+            const updatedAudioClips = localAudioClips.filter(c => !idsToDelete.has(c.id));
+
+            onUpdateVideoClips(updatedVideoClips);
+            setLocalAudioClips(updatedAudioClips);
+            onUpdateAudioClips(updatedAudioClips);
+            setSelectedClipIds(new Set());
+            setSelectedClipId(null);
+            setSelectedAudioClipId(null);
+            console.log('[ContextMenu Delete] Deleted', idsToDelete.size, 'clips');
+        } else if (contextMenu.type === 'clip') {
+            // Delete single video clip
+            const targetId = contextMenu.id;
             onUpdateVideoClips(videoClips.filter(c => c.id !== targetId));
         } else if (contextMenu.type === 'audio') {
-            const targetId = contextMenu.id; // Fixed: clipId -> id
+            const targetId = contextMenu.id;
             const updatedClips = localAudioClips.filter(c => c.id !== targetId);
             setLocalAudioClips(updatedClips);
             onUpdateAudioClips(updatedClips);
@@ -1814,6 +1992,22 @@ export default function TimelineEditor({
         setContextMenu(null);
     };
     const handleDelete = () => {
+        // If multiple clips are selected, delete all selected clips
+        if (selectedClipIds.size > 1) {
+            const idsToDelete = new Set(selectedClipIds);
+            const updatedVideoClips = videoClips.filter(c => !idsToDelete.has(c.id));
+            const updatedAudioClips = localAudioClips.filter(c => !idsToDelete.has(c.id));
+
+            onUpdateVideoClips(updatedVideoClips);
+            setLocalAudioClips(updatedAudioClips);
+            onUpdateAudioClips(updatedAudioClips);
+            setSelectedClipIds(new Set());
+            setSelectedClipId(null);
+            setSelectedAudioClipId(null);
+            console.log('[Toolbar Delete] Deleted', idsToDelete.size, 'clips');
+            return;
+        }
+
         if (selectedClipId) {
             const newClips = videoClips.filter(c => c.id !== selectedClipId);
             setVideoClips(newClips);
@@ -1946,14 +2140,27 @@ export default function TimelineEditor({
     const handleDrop = (e: React.DragEvent) => {
         e.preventDefault();
         // setDropIndicatorTime(null);
+
+        // Calculate drop time based on mouse position
+        let dropTime = 0;
+        if (containerRef.current) {
+            const rect = containerRef.current.getBoundingClientRect();
+            const x = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header offset
+            dropTime = Math.max(0, Math.min(x / pxPerSec, duration));
+        }
+
+        // 1. Check for Q Drive asset drops first
+        const tubiqAssetData = e.dataTransfer.getData('application/tubiq-asset');
+        if (tubiqAssetData && onDropAsset) {
+            console.log('[TimelineEditor] Q Drive asset dropped at time:', dropTime);
+            onDropAsset(tubiqAssetData, dropTime);
+            return;
+        }
+
+        // 2. Handle file drops
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0 && onDropFile) {
             const file = e.dataTransfer.files[0];
-            if (containerRef.current) {
-                const rect = containerRef.current.getBoundingClientRect();
-                const x = e.clientX - rect.left + containerRef.current.scrollLeft;
-                const time = Math.max(0, Math.min(x / pxPerSec, duration));
-                onDropFile(file, time);
-            }
+            onDropFile(file, dropTime);
         }
     };
 
@@ -1961,9 +2168,27 @@ export default function TimelineEditor({
     const handleVideoClipMouseDown = useCallback((e: React.MouseEvent, clip: VideoClip) => {
         if (e.button === 0) {
             e.stopPropagation();
-            // Left click - drag
+
+            // Ctrl+Click: Toggle selection for multi-select
+            if (e.ctrlKey || e.metaKey) {
+                setSelectedClipIds(prev => {
+                    const newSet = new Set(prev);
+                    if (newSet.has(clip.id)) {
+                        newSet.delete(clip.id);
+                    } else {
+                        newSet.add(clip.id);
+                    }
+                    return newSet;
+                });
+                // Don't start drag when Ctrl+clicking
+                return;
+            }
+
+            // Normal click - select single and prepare for drag
             setSelectedClipId(clip.id);
             setSelectedAudioClipId(null);
+            // Add to selectedClipIds as well for consistency
+            setSelectedClipIds(new Set([clip.id]));
 
             // Calculate grab offset (X and Y)
             const { grabOffsetX, grabOffsetY } = (() => {
@@ -2060,8 +2285,27 @@ export default function TimelineEditor({
     const handleAudioClipMouseDown = useCallback((e: React.MouseEvent, clip: AudioClip) => {
         if (e.button === 0) {
             e.stopPropagation();
+
+            // Ctrl+Click: Toggle selection for multi-select
+            if (e.ctrlKey || e.metaKey) {
+                setSelectedClipIds(prev => {
+                    const newSet = new Set(prev);
+                    if (newSet.has(clip.id)) {
+                        newSet.delete(clip.id);
+                    } else {
+                        newSet.add(clip.id);
+                    }
+                    return newSet;
+                });
+                // Don't start drag when Ctrl+clicking
+                return;
+            }
+
+            // Normal click - select single and prepare for drag
             setSelectedAudioClipId(clip.id);
             setSelectedClipId(null);
+            // Add to selectedClipIds as well for consistency
+            setSelectedClipIds(new Set([clip.id]));
 
             // Calculate grab offset (X and Y)
             const { grabOffsetX, grabOffsetY } = (() => {
@@ -2670,7 +2914,7 @@ export default function TimelineEditor({
                         return effectiveAudioLayers.map(audioLayer => {
                             const showAudioGap = audioDropIndicator && audioDropIndicator.layer === audioLayer && audioDropIndicator.gapIndex !== -1;
                             const audioLayerClips = localAudioClips
-                                .filter(clip => (clip.layer || 0) === audioLayer && clip.id !== isDragging?.id)
+                                .filter(clip => (clip.layer || 0) === audioLayer)
                                 .sort((a, b) => a.startTime - b.startTime);
 
                             return (
@@ -2706,7 +2950,7 @@ export default function TimelineEditor({
                                                                 clip={audioClip}
                                                                 pxPerSec={pxPerSec}
                                                                 containerDuration={duration}
-                                                                isSelected={selectedAudioClipId === audioClip.id}
+                                                                isSelected={selectedClipIds.has(audioClip.id)}
                                                                 isCutMode={isCutMode}
                                                                 audioWaveformL={audioWaveformL}
                                                                 containerRef={containerRef}
@@ -2714,7 +2958,11 @@ export default function TimelineEditor({
                                                                 onMouseDown={handleAudioClipMouseDown}
                                                                 onContextMenu={handleAudioClipContextMenu}
                                                                 onDragHandle={handleAudioClipDragHandle}
-                                                                isDragging={isDragging?.id === audioClip.id}
+                                                                isDragging={isDragging?.id === audioClip.id && isDragging?.type === 'move' && !!(
+                                                                    isDragging?.screenX && isDragging?.screenStartX &&
+                                                                    (Math.abs(isDragging.screenX - isDragging.screenStartX) > 5 ||
+                                                                        Math.abs((isDragging?.screenY || 0) - (isDragging?.screenStartY || 0)) > 5)
+                                                                )}
                                                                 trimLeftOffset={isDragging?.id === audioClip.id && isDragging?.type === 'left' ? (isDragging?.currentX || 0) * pxPerSec : 0}
                                                                 trimRightOffset={isDragging?.id === audioClip.id && isDragging?.type === 'right' ? (isDragging?.currentX || 0) * pxPerSec : 0}
                                                             />
@@ -2769,8 +3017,8 @@ export default function TimelineEditor({
                         <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-0.5 bg-gray-800 dark:bg-white shadow-lg group-hover:bg-indigo-500 transition-colors" />
                     </div>
 
-                    {/* Selection Box Overlay */}
-                    {selectionBox && (
+                    {/* Selection Box Overlay - only show when actively selecting */}
+                    {selectionBox && interactionMode === 'selecting' && (
                         <div
                             className="absolute border border-blue-400 bg-blue-400/20 z-[60] pointer-events-none"
                             style={{
@@ -2900,7 +3148,7 @@ export default function TimelineEditor({
                                 Math.abs((isDragging.screenY || 0) - (isDragging.screenStartY || 0)) > 5);
 
                         const clipWidth = (clip.endTime - clip.startTime) * pxPerSec;
-                        const clipHeight = 36;
+                        const clipHeight = 40; // Match actual h-10 = 40px
                         const dragX = (isDragging.screenX || 0) - (isDragging.screenStartX || 0);
                         const originalLeft = 40 + clip.startTime * pxPerSec;
 
@@ -2918,12 +3166,13 @@ export default function TimelineEditor({
                         const layerIndex = isDragging.type === 'move' ? (isDragging.stickyLayer ?? clip.layer ?? 0) : (clip.layer || 0);
                         const visualIndex = layerIndex; // Audio tracks are sequential 0..N
 
-                        // Audio track: 36px height + 6px spacer = 42px per track
-                        const originalTop = videoSectionHeight + ((clip.layer || 0) * 42);
+                        // Audio track: 40px height (h-10) + 6px spacer (h-1.5) = 46px per track
+                        const audioTrackHeight = 46;
+                        const originalTop = videoSectionHeight + ((clip.layer || 0) * audioTrackHeight);
                         const ghostTop = originalTop + (isDragging.currentY || 0);
 
-                        // Placeholder position (snapped)
-                        const placeholderTop = videoSectionHeight + (visualIndex * 42);
+                        // Placeholder position (snapped) - use same audioTrackHeight
+                        const placeholderTop = videoSectionHeight + (visualIndex * audioTrackHeight);
                         const placeholderLeft = originalLeft + dragX;
 
                         return (
@@ -2940,7 +3189,7 @@ export default function TimelineEditor({
                                     />
                                 )}
 
-                                {(() => {
+                                {hasMoved && (() => {
                                     // Calculate ghost position based on mouse movement
                                     const ghostLeft = originalLeft + dragX;
                                     const dragY = (isDragging.screenY || 0) - (isDragging.screenStartY || 0);

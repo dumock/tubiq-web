@@ -22,6 +22,7 @@ interface UseTimelineEngineProps {
     onTimeUpdate: (time: number) => void;
     duration: number;
     shouldMuteVideo?: boolean;
+    blobVideoUrl?: string | null; // Pre-cached blob URL for instant scrubbing
 }
 
 // =========================================================
@@ -94,7 +95,8 @@ export function useTimelineEngine({
     videoClips,
     onTimeUpdate,
     duration,
-    shouldMuteVideo = false
+    shouldMuteVideo = false,
+    blobVideoUrl = null
 }: UseTimelineEngineProps) {
     // -------------------------
     // Public State (exposed to UI)
@@ -102,6 +104,16 @@ export function useTimelineEngine({
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
     const [isScrubbing, setIsScrubbing] = useState(false);
+
+    // Helper: Get video source URL (prefer blob URL for instant scrubbing)
+    const getVideoSrc = useCallback((clip: VideoClip): string => {
+        // Use blob URL for layer 0 clips if available (instant local seek)
+        if (blobVideoUrl && (clip.layer === 0 || clip.layer === undefined)) {
+            return blobVideoUrl;
+        }
+        // Fallback to proxy URL for HTTP sources
+        return getProxiedUrl(clip.src);
+    }, [blobVideoUrl]);
 
     // -------------------------
     // State Machine
@@ -118,6 +130,13 @@ export function useTimelineEngine({
         gapStartTime: 0,
         preSeekDone: false
     });
+
+    // Scrub throttling - prevents overwhelming the video decoder
+    const scrubRafRef = useRef<number | null>(null);
+    const pendingScrubTimeRef = useRef<number | null>(null);
+    const isSeekingRef = useRef(false); // Track if video is currently seeking
+    const lastSeekTimeRef = useRef(0); // Last seek timestamp for throttling
+    const SEEK_THROTTLE_MS = 50; // Minimum ms between seeks
 
     // -------------------------
     // State Transition Helpers
@@ -163,10 +182,11 @@ export function useTimelineEngine({
     // -------------------------
     const startVideoPlayback = useCallback((clip: VideoClip, video: HTMLVideoElement) => {
         const currentSrc = video.currentSrc || video.src;
-        const needsSourceSwitch = !isSameSource(currentSrc, clip.src || '');
+        const targetSrc = getVideoSrc(clip);
+        const needsSourceSwitch = !isSameSource(currentSrc, targetSrc);
 
         if (needsSourceSwitch && clip.src) {
-            video.src = getProxiedUrl(clip.src);
+            video.src = targetSrc;
         }
 
         const doPlay = () => {
@@ -264,10 +284,11 @@ export function useTimelineEngine({
                 gapState.preSeekDone = true;
 
                 const currentSrc = video.currentSrc || video.src;
-                const needsSourceSwitch = !isSameSource(currentSrc, nextClip.src);
+                const targetSrc = getVideoSrc(nextClip);
+                const needsSourceSwitch = !isSameSource(currentSrc, targetSrc);
 
                 if (needsSourceSwitch) {
-                    video.src = getProxiedUrl(nextClip.src);
+                    video.src = targetSrc;
                 }
                 video.currentTime = nextClip.sourceStart;
                 console.log('[Engine] Pre-seeking to:', nextClip.sourceStart);
@@ -311,7 +332,7 @@ export function useTimelineEngine({
         const handleTimeUpdate = () => {
             const state = engineStateRef.current;
             const videoTime = video.currentTime;
-            const clip = activeClipRef.current;
+            let clip = activeClipRef.current;
 
             // Skip during scrubbing
             if (state === 'SCRUBBING') return;
@@ -328,6 +349,25 @@ export function useTimelineEngine({
 
             // Skip if paused and no explicit seek
             if (state === 'PAUSED' && video.paused) return;
+
+            // Validate activeClipRef is still correct for current video time
+            if (clip) {
+                const isWithinClip = videoTime >= clip.sourceStart - 0.1 && videoTime <= clip.sourceEnd + 0.1;
+                if (!isWithinClip) {
+                    // activeClipRef is stale - find correct clip by video time
+                    const correctedClip = videoClips.find(c =>
+                        videoTime >= c.sourceStart - 0.1 &&
+                        videoTime <= c.sourceEnd + 0.1 &&
+                        (c.layer === 0 || c.layer === undefined)
+                    );
+
+                    if (correctedClip) {
+                        console.log('[Engine] timeupdate: Correcting stale activeClipRef');
+                        activeClipRef.current = correctedClip;
+                        clip = correctedClip;
+                    }
+                }
+            }
 
             if (!clip) {
                 // No active clip but not in gap mode - this shouldn't happen during playback
@@ -437,7 +477,13 @@ export function useTimelineEngine({
 
     // Cleanup on unmount
     useEffect(() => {
-        return () => clearGapTimer();
+        return () => {
+            clearGapTimer();
+            // Cancel any pending scrub RAF
+            if (scrubRafRef.current !== null) {
+                cancelAnimationFrame(scrubRafRef.current);
+            }
+        };
     }, [clearGapTimer]);
 
     // =========================================================
@@ -499,13 +545,19 @@ export function useTimelineEngine({
             setIsPlaying(true);
 
             const currentSrc = video.currentSrc || video.src;
-            const needsSourceSwitch = !currentSrc || !isSameSource(currentSrc, clip.src);
+            const targetSrc = getVideoSrc(clip);
+            const needsSourceSwitch = !currentSrc || !isSameSource(currentSrc, targetSrc);
 
             if (needsSourceSwitch) {
-                video.src = getProxiedUrl(clip.src);
-                const targetVideoTime = timelineTimeToVideoTime(currentTime, clip);
-                video.currentTime = Math.max(0, targetVideoTime);
+                video.src = targetSrc;
             }
+
+            // ALWAYS seek to correct position (fix for second clip issues)
+            const targetVideoTime = timelineTimeToVideoTime(currentTime, clip);
+            const clampedVideoTime = Math.max(clip.sourceStart, Math.min(targetVideoTime, clip.sourceEnd - 0.05));
+
+            console.log('[Engine] Seeking video to:', clampedVideoTime, 'for timeline:', currentTime);
+            video.currentTime = clampedVideoTime;
 
             video.muted = shouldMuteVideo || (clip.hasAudio === false);
 
@@ -530,17 +582,47 @@ export function useTimelineEngine({
 
         clearGapTimer();
 
-        // Sync time before pausing
-        if (video && activeClipRef.current) {
-            const syncedTime = videoTimeToTimelineTime(video.currentTime, activeClipRef.current);
-            setCurrentTime(syncedTime);
-            onTimeUpdate(syncedTime);
+        // Pause video first to freeze the frame
+        video?.pause();
+
+        // Calculate correct timeline time from current video state
+        if (video) {
+            const videoTime = video.currentTime;
+
+            // Try activeClipRef first, but verify it's still valid
+            let clip = activeClipRef.current;
+
+            // Validate that current video time is within the active clip's source range
+            if (clip) {
+                const isWithinClip = videoTime >= clip.sourceStart - 0.1 && videoTime <= clip.sourceEnd + 0.1;
+                if (!isWithinClip) {
+                    // activeClipRef is stale - find the correct clip by matching video time to source ranges
+                    clip = videoClips.find(c =>
+                        videoTime >= c.sourceStart - 0.1 &&
+                        videoTime <= c.sourceEnd + 0.1 &&
+                        (c.layer === 0 || c.layer === undefined)
+                    ) || null;
+
+                    if (clip) {
+                        console.log('[Engine] Corrected stale activeClipRef from video time:', videoTime);
+                        activeClipRef.current = clip;
+                    }
+                }
+            }
+
+            if (clip) {
+                const syncedTime = videoTimeToTimelineTime(videoTime, clip);
+                // Clamp to clip boundaries to prevent overshooting
+                const clampedTime = Math.max(clip.startTime, Math.min(syncedTime, clip.endTime));
+                console.log('[Engine] Pause synced time:', clampedTime, 'from videoTime:', videoTime);
+                setCurrentTime(clampedTime);
+                onTimeUpdate(clampedTime);
+            }
         }
 
         transitionTo('PAUSED');
         setIsPlaying(false);
-        video?.pause();
-    }, [videoRef, onTimeUpdate, clearGapTimer, transitionTo]);
+    }, [videoRef, videoClips, onTimeUpdate, clearGapTimer, transitionTo]);
 
     const togglePlay = useCallback(() => {
         if (isPlaying) {
@@ -553,6 +635,13 @@ export function useTimelineEngine({
     const startScrub = useCallback(() => {
         console.log('[Engine] startScrub(), wasPlaying:', isPlaying);
         wasPlayingBeforeScrubRef.current = isPlaying;
+
+        // Clear any pending RAF from previous scrub
+        if (scrubRafRef.current !== null) {
+            cancelAnimationFrame(scrubRafRef.current);
+            scrubRafRef.current = null;
+        }
+        pendingScrubTimeRef.current = null;
 
         clearGapTimer();
         transitionTo('SCRUBBING');
@@ -576,7 +665,19 @@ export function useTimelineEngine({
     }, [play, transitionTo]);
 
     const seek = useCallback((time: number) => {
+        console.log('[Engine] seek() called, time:', time);
+
         clearGapTimer();
+
+        // CRITICAL: Stop playback completely
+        transitionTo('PAUSED');
+        setIsPlaying(false);
+
+        // Ensure video is paused to prevent race conditions
+        const video = videoRef.current;
+        if (video && !video.paused) {
+            video.pause();
+        }
 
         // Update timeline state immediately
         setCurrentTime(time);
@@ -586,36 +687,91 @@ export function useTimelineEngine({
         const clip = findActiveClip(time);
         activeClipRef.current = clip;
 
+        console.log('[Engine] seek: found clip:', clip?.id, 'startTime:', clip?.startTime, 'endTime:', clip?.endTime);
+
         // Sync video to show frame
-        const video = videoRef.current;
         if (video && clip?.src) {
             const currentSrc = video.currentSrc || video.src;
-            if (!isSameSource(currentSrc, clip.src)) {
-                video.src = getProxiedUrl(clip.src);
+            const targetSrc = getVideoSrc(clip);
+            if (!isSameSource(currentSrc, targetSrc)) {
+                console.log('[Engine] seek: switching source');
+                video.src = targetSrc;
             }
-            video.currentTime = timelineTimeToVideoTime(time, clip);
-        }
-    }, [onTimeUpdate, videoRef, findActiveClip, clearGapTimer]);
 
+            // Calculate target video time and clamp to clip's source boundaries
+            const targetVideoTime = timelineTimeToVideoTime(time, clip);
+            const clampedVideoTime = Math.max(
+                clip.sourceStart,
+                Math.min(targetVideoTime, clip.sourceEnd - 0.01)
+            );
+
+            console.log('[Engine] seek: setting video.currentTime to', clampedVideoTime, '(timeline:', time, ', clip.sourceStart:', clip.sourceStart, ')');
+            video.currentTime = clampedVideoTime;
+        } else if (!clip) {
+            console.log('[Engine] seek: no clip at time', time, '(in gap)');
+        }
+    }, [onTimeUpdate, videoRef, findActiveClip, clearGapTimer, transitionTo]);
+
+    /**
+     * Real-time scrub preview with time-based throttling
+     * - UI (playhead/currentTime) updates IMMEDIATELY for responsive feel
+     * - Video seeks are throttled to allow frame decoding
+     */
     const previewFrame = useCallback((time: number) => {
+        // 1. UI FIRST: Update state immediately so playhead follows mouse instantly
+        setCurrentTime(time);
+        onTimeUpdate(time);
+
+        // 2. VIDEO: Store pending time
+        pendingScrubTimeRef.current = time;
+
         const video = videoRef.current;
         if (!video) return;
 
-        const clip = findActiveClip(time);
-        if (!clip?.src) return;
+        // Check time-based throttling
+        const now = performance.now();
+        const timeSinceLastSeek = now - lastSeekTimeRef.current;
 
-        const currentSrc = video.currentSrc || video.src;
-        if (!isSameSource(currentSrc, clip.src)) {
-            video.src = getProxiedUrl(clip.src);
+        if (timeSinceLastSeek < SEEK_THROTTLE_MS) {
+            // Schedule a delayed seek if not already scheduled
+            if (scrubRafRef.current === null) {
+                const delay = SEEK_THROTTLE_MS - timeSinceLastSeek;
+                scrubRafRef.current = window.setTimeout(() => {
+                    scrubRafRef.current = null;
+                    doActualSeek();
+                }, delay) as unknown as number;
+            }
+            return;
         }
 
-        const targetVideoTime = timelineTimeToVideoTime(time, clip);
-        if ('fastSeek' in video && typeof video.fastSeek === 'function') {
-            video.fastSeek(targetVideoTime);
-        } else {
-            video.currentTime = targetVideoTime;
+        doActualSeek();
+
+        function doActualSeek() {
+            const targetTime = pendingScrubTimeRef.current;
+            if (targetTime === null) return;
+
+            const clip = findActiveClip(targetTime);
+            if (!clip?.src) return;
+
+            // Handle source switch if needed
+            const currentSrc = video.currentSrc || video.src;
+            const targetSrc = getVideoSrc(clip);
+            if (!isSameSource(currentSrc, targetSrc)) {
+                video.src = targetSrc;
+            }
+
+            // Clamp to clip's source boundaries
+            const targetVideoTime = timelineTimeToVideoTime(targetTime, clip);
+            const clampedVideoTime = Math.max(
+                clip.sourceStart,
+                Math.min(targetVideoTime, clip.sourceEnd - 0.01)
+            );
+
+            // Update last seek time and set video position
+            lastSeekTimeRef.current = performance.now();
+            video.currentTime = clampedVideoTime;
         }
-    }, [videoRef, findActiveClip]);
+    }, [videoRef, findActiveClip, onTimeUpdate, getVideoSrc]);
 
     // Expose gap/transition state for TimelineEditor
     const isInGapOrTransition =

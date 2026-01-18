@@ -154,7 +154,7 @@ export const VideoClipItem = memo(({
                     e.stopPropagation();
                     if (containerRef.current) {
                         const rect = containerRef.current.getBoundingClientRect();
-                        const x = e.clientX - rect.left + containerRef.current.scrollLeft;
+                        const x = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header offset
                         const time = Math.max(0, Math.min(x / pxPerSec, containerDuration));
                         splitClip(clip.id, 'video', time);
                     }
@@ -378,11 +378,7 @@ export const VideoClipItem = memo(({
         </div >
     );
 }, (prev, next) => {
-    // Custom comparison for performance if needed, or rely on shallow compare
-    // We care about: clip (position/time), isSelected, isCutMode, pxPerSec, styling props
-    // We do NOT want to re-render if just 'currentTime' (playhead) changes in parent, unless it affects this clip (it shouldn't).
-    // The parent re-renders typically on 'updatePlayhead' which updates a REF, not state, so it doesn't trigger React render.
-    // However, if parent state changes (e.g. selection), we need update.
+    // Custom comparison for performance
     return (
         prev.clip === next.clip &&
         prev.layerIndex === next.layerIndex &&
@@ -391,10 +387,11 @@ export const VideoClipItem = memo(({
         prev.isCutMode === next.isCutMode &&
         prev.frameThumbnails === next.frameThumbnails &&
         prev.containerDuration === next.containerDuration &&
-        // Functions usually unstable if inline, need useCallback in parent
         prev.onMouseDown === next.onMouseDown &&
         prev.contextMenu === next.contextMenu &&
-        prev.isDragging === next.isDragging // Add isDragging check
+        prev.isDragging === next.isDragging &&
+        prev.trimLeftOffset === next.trimLeftOffset &&
+        prev.trimRightOffset === next.trimRightOffset
     );
 });
 
@@ -515,24 +512,20 @@ export const UnlinkedAudioClipItem = memo(({
                 width: Math.max(clipWidth - trimLeftOffset + trimRightOffset, 20),
                 height: 40
             }}
-            onClick={(e) => {
-                e.stopPropagation();
+            onMouseDown={(e) => {
+                console.log('[Audio onMouseDown] isCutMode:', isCutMode, 'clip:', clip.id);
                 if (isCutMode) {
+                    e.stopPropagation();
+                    e.preventDefault();
                     if (containerRef.current) {
                         const rect = containerRef.current.getBoundingClientRect();
-                        const x = e.clientX - rect.left + containerRef.current.scrollLeft;
+                        const x = e.clientX - rect.left + containerRef.current.scrollLeft - 40; // 40px header offset
                         const time = Math.max(0, Math.min(x / pxPerSec, containerDuration));
+                        console.log('[Audio Cut] Splitting at time:', time, 'clip:', clip.id);
                         splitClip(clip.id, 'audio', time);
+                    } else {
+                        console.log('[Audio Cut] containerRef.current is null!');
                     }
-                    return;
-                }
-                // Normal select is handled by onMouseDown or onClick? 
-                // Original code had both? No, original had onClick for select/cut, and onMouseDown for drag.
-                // We will consolidate.
-            }}
-            onMouseDown={(e) => {
-                if (isCutMode) {
-                    // Click handler above handles cut.
                     return;
                 }
                 e.stopPropagation();
@@ -553,17 +546,19 @@ export const UnlinkedAudioClipItem = memo(({
                 className="absolute inset-0 pointer-events-none"
             />
 
-            {/* Yellow Volume Control Line (CapCut style) */}
-            <div
-                className="absolute left-0 right-0 cursor-ns-resize group hover:bg-yellow-400/10"
-                style={{
-                    top: `${Math.max(10, Math.min(90, 60 - ((clip.volume ?? 1) - 1) * 50))}%`,
-                    height: 3,
-                    zIndex: 15
-                }}
-            >
-                <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 bg-yellow-400/60 group-hover:bg-yellow-400 transition-all" style={{ height: '0.5px' }} />
-            </div>
+            {/* Yellow Volume Control Line (CapCut style) - disabled in cut mode */}
+            {!isCutMode && (
+                <div
+                    className="absolute left-0 right-0 cursor-ns-resize group hover:bg-yellow-400/10"
+                    style={{
+                        top: `${Math.max(10, Math.min(90, 60 - ((clip.volume ?? 1) - 1) * 50))}%`,
+                        height: 3,
+                        zIndex: 15
+                    }}
+                >
+                    <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 bg-yellow-400/60 group-hover:bg-yellow-400 transition-all" style={{ height: '0.5px' }} />
+                </div>
+            )}
 
             <div className="absolute top-0.5 left-1 text-[8px] text-emerald-300 pointer-events-none max-w-full truncate">🔊 {clip.name || '분리됨'}</div>
         </div>
