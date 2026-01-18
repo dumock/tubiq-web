@@ -243,7 +243,8 @@ export function useTimelineEngine({
     // -------------------------
     // Start Gap Playback
     // -------------------------
-    const startGapPlayback = useCallback((fromTime: number, nextClip: VideoClip, video: HTMLVideoElement) => {
+    // nextClip can be null - in that case, play until duration (for audio-only trailing section)
+    const startGapPlayback = useCallback((fromTime: number, nextClip: VideoClip | null, video: HTMLVideoElement) => {
         clearGapTimer();
 
         transitionTo('PLAYING_GAP');
@@ -260,7 +261,8 @@ export function useTimelineEngine({
         gapState.nextClip = nextClip;
         gapState.preSeekDone = false;
 
-        console.log('[Engine] Gap playback: from', fromTime, 'to clip at', nextClip.startTime);
+        const targetTime = nextClip ? nextClip.startTime : duration;
+        console.log('[Engine] Gap playback: from', fromTime, 'to', nextClip ? `clip at ${nextClip.startTime}` : `duration ${duration}`);
 
         gapState.intervalId = setInterval(() => {
             const state = engineStateRef.current;
@@ -274,9 +276,25 @@ export function useTimelineEngine({
             const elapsed = (performance.now() - gapState.startWallTime) / 1000;
             const newTime = gapState.gapStartTime + elapsed;
 
+            // Check if we've reached the end of timeline (duration)
+            if (newTime >= duration) {
+                console.log('[Engine] Reached end of timeline duration:', duration);
+                clearGapTimer();
+                transitionTo('PAUSED');
+                setIsPlaying(false);
+                setCurrentTime(duration);
+                onTimeUpdate(duration);
+                return;
+            }
+
             // Always update timeline position
             setCurrentTime(newTime);
             onTimeUpdate(newTime);
+
+            // If no next clip, just continue gap playback until duration
+            if (!nextClip) {
+                return;
+            }
 
             // Pre-seek: 0.5s before gap ends
             const preSeekTime = 0.5;
@@ -320,7 +338,7 @@ export function useTimelineEngine({
                     });
             }
         }, 16); // ~60fps
-    }, [clearGapTimer, onTimeUpdate, shouldMuteVideo, transitionTo]);
+    }, [clearGapTimer, duration, onTimeUpdate, shouldMuteVideo, transitionTo]);
 
     // =========================================================
     // Video Event Handlers
@@ -417,12 +435,22 @@ export function useTimelineEngine({
                         startVideoPlayback(nextClip, video);
                     }
                 } else {
-                    // No more clips - end of timeline
-                    console.log('[Engine] End of timeline');
-                    transitionTo('PAUSED');
-                    setIsPlaying(false);
-                    setCurrentTime(clip.endTime);
-                    onTimeUpdate(clip.endTime);
+                    // No more video clips - check if there's still time until duration
+                    if (clip.endTime < duration - 0.1) {
+                        // Continue gap playback until duration (for audio-only trailing section)
+                        console.log('[Engine] No more video clips, continuing gap to duration:', duration);
+                        const gapCurrentTime = Math.max(clip.endTime, timelineTime);
+                        setCurrentTime(gapCurrentTime);
+                        onTimeUpdate(gapCurrentTime);
+                        startGapPlayback(gapCurrentTime, null, video);
+                    } else {
+                        // Truly end of timeline
+                        console.log('[Engine] End of timeline');
+                        transitionTo('PAUSED');
+                        setIsPlaying(false);
+                        setCurrentTime(clip.endTime);
+                        onTimeUpdate(clip.endTime);
+                    }
                 }
             } else {
                 // Normal playback - update timeline position
@@ -461,8 +489,17 @@ export function useTimelineEngine({
                     startVideoPlayback(nextClip, video);
                 }
             } else {
-                transitionTo('PAUSED');
-                setIsPlaying(false);
+                // No more video clips - check if there's still time until duration
+                if (clip.endTime < duration - 0.1) {
+                    // Continue gap playback until duration (for audio-only trailing section)
+                    console.log('[Engine] Video ended, continuing gap to duration:', duration);
+                    setCurrentTime(clip.endTime);
+                    onTimeUpdate(clip.endTime);
+                    startGapPlayback(clip.endTime, null, video);
+                } else {
+                    transitionTo('PAUSED');
+                    setIsPlaying(false);
+                }
             }
         };
 
@@ -473,7 +510,7 @@ export function useTimelineEngine({
             video.removeEventListener('timeupdate', handleTimeUpdate);
             video.removeEventListener('ended', handleEnded);
         };
-    }, [videoRef, videoClips, onTimeUpdate, transitionTo, startGapPlayback, startVideoPlayback]);
+    }, [videoRef, videoClips, duration, onTimeUpdate, transitionTo, startGapPlayback, startVideoPlayback]);
 
     // Cleanup on unmount
     useEffect(() => {
@@ -571,10 +608,15 @@ export function useTimelineEngine({
             if (nextClip) {
                 setIsPlaying(true);
                 startGapPlayback(currentTime, nextClip, video);
+            } else if (currentTime < duration - 0.1) {
+                // No next video clip, but still time until duration (audio-only section)
+                console.log('[Engine] Playing gap until duration:', duration);
+                setIsPlaying(true);
+                startGapPlayback(currentTime, null, video);
             }
-            // No next clip = at end of timeline, don't do anything
+            // No next clip and at end of timeline = don't do anything
         }
-    }, [videoRef, currentTime, findActiveClip, findNextClip, shouldMuteVideo, transitionTo, startGapPlayback]);
+    }, [videoRef, currentTime, duration, findActiveClip, findNextClip, shouldMuteVideo, transitionTo, startGapPlayback]);
 
     const pause = useCallback(() => {
         console.log('[Engine] pause() called');
